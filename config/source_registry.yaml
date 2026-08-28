@@ -1,0 +1,111 @@
+version: 1
+
+categories:
+
+  official:
+    priority: 100
+    fetch_limit: 3
+    domains: []
+
+  documentation:
+    priority: 95
+    fetch_limit: 3
+    subdomains:
+      - docs
+      - developer
+      - support
+      - wiki
+      - manual
+      - api
+
+  code:
+    priority: 93
+    fetch_limit: 3
+    domains:
+      - github.com
+      - gitlab.com
+      - bitbucket.org
+      - sourcehut.org
+
+  pdf:
+    priority: 92
+    fetch_limit: 2
+    extensions:
+      - pdf
+
+  forum:
+    priority: 90
+    fetch_limit: 2
+    domains:
+      - reddit.com
+      - stackoverflow.com
+      - stackexchange.com
+      - discourse.org
+    subdomains:
+      - forum
+      - community
+      - discuss
+
+  government:
+    priority: 88
+    fetch_limit: 2
+    tlds:
+      - gov
+      - go.id
+
+  video:
+    priority: 80
+    fetch_limit: 2
+    domains:
+      - youtube.com
+      - youtu.be
+      - tiktok.com
+      - bilibili.com
+      - vimeo.com
+      - dailymotion.com
+
+  marketplace:
+    priority: 70
+    fetch_limit: 2
+    domains:
+      - tokopedia.com
+      - shopee.co.id
+      - lazada.co.id
+      - bukalapak.com
+      - amazon.com
+      - ebay.com
+      - aliexpress.com
+
+  social:
+    priority: 60
+    fetch_limit: 2
+    domains:
+      - facebook.com
+      - instagram.com
+      - threads.net
+      - x.com
+      - linkedin.com
+      - mastodon.social
+
+  academic:
+    priority: 50
+    fetch_limit: 2
+    domains:
+      - arxiv.org
+      - ieee.org
+      - acm.org
+      - researchgate.net
+      - scholar.google.com
+
+  news:
+    priority: 40
+    fetch_limit: 2
+    domains:
+      - reuters.com
+      - apnews.com
+      - bbc.com
+      - cnn.com
+      - techcrunch.com
+      - theverge.com
+      - detik.com
+      - kompas.com

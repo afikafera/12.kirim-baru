@@ -1,0 +1,1 @@
+spesifikasi ESP32 WROOM 32

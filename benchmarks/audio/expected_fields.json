@@ -1,0 +1,6 @@
+[
+  "nominal_power_handling", "program_power", "frequency_response",
+  "impedance", "sensitivity", "fs", "qts", "qes", "qms",
+  "vas", "xmax", "bl_product", "sd", "magnet_weight",
+  "voice_coil_diameter", "speaker_diameter", "speaker_weight"
+]

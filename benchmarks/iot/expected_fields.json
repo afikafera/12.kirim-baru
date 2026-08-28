@@ -1,0 +1,6 @@
+[
+  "cpu", "cpu_frequency", "flash_memory", "sram", "rom",
+  "wifi_standard", "bluetooth_version",
+  "gpio_pins", "adc", "dac",
+  "operating_voltage", "operating_temperature"
+]

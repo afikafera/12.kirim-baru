@@ -1,0 +1,6 @@
+[
+  "cpu", "architecture", "ram", "storage",
+  "ethernet_ports", "sfp_plus", "poe",
+  "license_level", "max_power_consumption",
+  "dimensions", "weight", "operating_temperature"
+]

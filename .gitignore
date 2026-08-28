@@ -1,0 +1,81 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Runtime/cache
+cache/
+browser_profiles/
+*.log
+
+# Generated audit/runtime output
+audit_results.txt
+fetch_audit.txt
+
+# Local databases / PostgreSQL runtime
+data/postgres/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Backup files — historical backups remain on disk, Git tracks clean source only
+*.bak
+*.bak.*
+*~
+
+# Project runtime state
+data/
+
+# Local/historical artifacts
+backup/
+backups/
+-fp*
+Screenshot *.png
+acrr.html
+
+# Additional historical backup variants
+*.backup
+*.backup_*
+*.backup-*
+*.bak-*
+*.orig
+*.old
+*.save
+
+# Embedded/external repository — kept separately
+/agent-reach/
+
+# Runtime logs
+*.log
+
+# Historical backup naming variants
+*.bak_*
+*.bak-*
+*.bak.*
+*.backup_*
+*.backup-*
+*.backup.*
+*.backup
+*.orig
+*.old
+*.save
+
+# Historical source snapshots
+*.before-*
+*.before_*
+*.rollback-*
+*.rollback_*
+
+/agent-reach/

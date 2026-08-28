@@ -1,0 +1,1631 @@
+import re
+import json
+import contextvars
+import threading
+import time
+import logging
+from urllib.parse import urlparse
+from hermes_agent.jsonl_logger import log_event, init_request_id
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from agent_reach.searcher import AgentReachSearcher
+from agent_reach.evidence import DocumentIntelligence
+from hermes_agent.task_planner import TaskPlanner
+from hermes_agent.completeness_checker import CompletenessChecker
+from hermes_agent.knowledge_graph import KnowledgeGraph
+from hermes_agent.semantic_router import SemanticRouter
+from hermes_agent.skill_router import SkillRouter
+from hermes_agent.skill_bridge import SkillBridge
+from hermes_agent.skill_executors import (
+    agent_reach_executor,
+    agent_reach_fetch_executor,
+)
+from hermes_agent.search_strategy import SearchStrategy
+from hermes_agent.fact_checker import FactChecker
+from hermes_agent.fact_ranker import FactRanker
+from hermes_agent.token_profiler import TokenProfiler
+from hermes_agent.latency_profiler import LatencyProfiler
+from hermes_agent.user_memory import UserMemory
+
+logger = logging.getLogger(__name__)
+
+_WEB_OCR_LOCK = threading.Lock()
+
+
+class HermesAgent:
+
+    MAX_ITERATIONS = 20
+    PARALLEL_NODES = 3
+    MIN_COVERAGE = 50
+    MAX_RETRIES = 2
+    MAX_TOTAL_FACTS = 80
+    EARLY_STOP_COVERAGE = 85
+    MIN_FACTS_TO_STOP = 25
+    MAX_FACTS_PER_NODE = 8
+    MAX_FACTS_IN_ANSWER = 5
+    MAX_WORKERS = 4
+    CACHE_MAX = 500
+    RESEARCH_THRESHOLD = 5
+
+    def __init__(self, memory_manager, calibrator, llm_analyzer, outcome_logger, lessons_engine):
+        self.mm = memory_manager
+        self.cal = calibrator
+        self.llm = llm_analyzer
+        self.outcome = outcome_logger
+        self.lessons = lessons_engine
+        self.user_memory = UserMemory()
+        self.task_planner = TaskPlanner(llm_analyzer)
+        self.router = SemanticRouter()
+        self.skill_router = SkillRouter()
+        self.completeness = CompletenessChecker(llm_analyzer)
+        self.strategy = SearchStrategy(llm_analyzer)
+        self.searcher = AgentReachSearcher(llm_analyzer)
+
+        # Skill bridge: core delegates capability execution to registered skills.
+        self.skill_bridge = SkillBridge(self.skill_router)
+        self.skill_bridge.register(
+            "agent-reach",
+            lambda query, **kwargs: agent_reach_executor(
+                self.searcher,
+                query,
+                **kwargs,
+            ),
+        )
+        self.skill_bridge.register(
+            "agent-reach-fetch",
+            lambda url, **kwargs: agent_reach_fetch_executor(
+                self.searcher,
+                url,
+                **kwargs,
+            ),
+        )
+        self.docintel = DocumentIntelligence()
+        self.facts = FactChecker(llm_analyzer)
+        self.ranker = FactRanker()
+        self._strategy_cache = {}
+
+    def _make_requirement_id(self, topic: str, need: str) -> str:
+        return f"{topic} [{need}]"
+
+    def _total_facts(self, kg: KnowledgeGraph, scope: set = None) -> int:
+        nodes = kg.graph["nodes"]
+        if scope is not None:
+            nodes = {k: v for k, v in nodes.items() if k in scope}
+        return sum(len(n.get("facts", [])) for n in nodes.values())
+
+    def _coverage(self, kg: KnowledgeGraph, scope: set = None) -> float:
+        nodes = kg.graph["nodes"]
+        if scope is not None:
+            nodes = {k: v for k, v in nodes.items() if k in scope}
+        found = sum(1 for n in nodes.values() if n.get("status") in ("found", "verified"))
+        total = sum(1 for n in nodes.values() if n.get("type") != "project")
+        return (found / total * 100) if total > 0 else 0
+
+    def _fetch_url_parallel(self, urls: list, seen: set, query: str) -> list:
+        results = []
+        def fetch_one(url):
+            if url in seen: return None
+            raw = self.skill_bridge.execute_skill(
+                "agent-reach-fetch",
+                url,
+            )
+            if raw and raw.startswith("Error fetch"):
+                logger.info("[AUDIT FETCH ERROR] url=%s raw=%r", url, raw[:300])
+            if raw and len(raw) > 50:
+                processed = self.docintel.process(raw, query)
+
+                content = processed["formatted"]
+
+                # Web image OCR bridge: optional enrichment only.
+                if "![" in content:
+                    try:
+                        from agent_reach.agent_browser_asset_resolver import (
+                            AgentBrowserAssetResolver,
+                        )
+
+                        with _WEB_OCR_LOCK:
+                            resolver = AgentBrowserAssetResolver()
+                            assets = resolver.fetch_spec_assets(url)
+
+                        ocr_blocks = []
+                        for asset_url, asset_bytes in assets.items():
+                            asset_type = resolver.classify_asset(asset_url)
+                            if resolver.processing_strategy(asset_type) != "ocr_extract":
+                                continue
+
+                            ocr_result = resolver.ocr_asset_paddle(
+                                asset_bytes,
+                                asset_type=asset_type,
+                            )
+                            texts = ocr_result.get("texts", [])
+                            ocr_text = "\n".join(
+                                str(text).strip()
+                                for text in texts
+                                if str(text).strip()
+                            )
+
+                            if ocr_text:
+                                ocr_blocks.append(
+                                    f"[WEB IMAGE OCR | {asset_type}] {asset_url}\n{ocr_text}"
+                                )
+                                logger.info(
+                                    "[AUDIT WEB OCR] url=%s asset=%s asset_type=%s texts=%d",
+                                    url, asset_url, asset_type, len(texts),
+                                )
+
+                        if ocr_blocks:
+                            content += "\n\n" + "\n\n".join(ocr_blocks)
+
+                    except Exception as exc:
+                        logger.warning(
+                            "[AUDIT WEB OCR ERROR] url=%s error=%s", url, exc,
+                        )
+
+                logger.info(
+                    "[AUDIT DOCINTEL] url=%s doc_type=%s sections_total=%s sections_kept=%s char_before=%s char_after=%s",
+                    url, processed.get("doc_type"), processed.get("sections_total"),
+                    processed.get("sections_kept"), processed.get("char_before"), processed.get("char_after"),
+                )
+                return {"url": url, "content": content, "doc_type": processed["doc_type"]}
+            return None
+        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(contextvars.copy_context().run, fetch_one, url): url
+                for url in urls
+                if url not in seen
+            }
+
+            fetched = {}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    fetched[futures[future]] = result
+
+        return [
+            fetched[url]
+            for url in urls
+            if url in fetched
+        ][:2]
+
+    def _get_strategy(self, topic: str, need: str) -> dict:
+        cache_key = f"{topic}|{need}"
+        if cache_key not in self._strategy_cache:
+            if len(self._strategy_cache) >= self.CACHE_MAX:
+                keys = list(self._strategy_cache.keys())[:100]
+                for k in keys: del self._strategy_cache[k]
+            self._strategy_cache[cache_key] = self.strategy.generate(
+                f"{topic} {need}", "general", "general", topic
+            )
+        return self._strategy_cache[cache_key]
+
+    def _validate_evidence_relevance(
+        self,
+        topic: str,
+        need: str,
+        evidence: list,
+    ) -> list:
+        """
+        Requirement-level evidence gate.
+
+        Evidence hanya diteruskan ke extraction jika dokumen secara
+        substantif membahas requirement yang sedang diproses.
+
+        Validator bersifat generic:
+        - tidak hardcode nama protokol;
+        - tidak hardcode angka benchmark;
+        - tidak menentukan fakta teknis;
+        - hanya menentukan apakah evidence relevan dengan topic + need.
+
+        Jika LLM validator gagal, evidence TIDAK otomatis dianggap valid.
+        """
+
+        if not evidence:
+            return []
+
+        validated = []
+
+        for ev in evidence:
+            url = ev.get("url", "")
+            content = ev.get("content", "")
+
+            source_type = str(
+                ev.get("source_type")
+                or ev.get("evidence_type")
+                or ev.get("doc_type")
+                or ""
+            ).lower()
+
+            if not content or (len(content.strip()) < 80 and source_type != "user_attachment"):
+                logger.info(
+                    "[AUDIT EVIDENCE GATE] topic=%s url=%s decision=REJECT reason=empty_or_short",
+                    topic,
+                    url,
+                )
+                continue
+
+            prompt = f"""You are an evidence relevance validator.
+
+REQUIREMENT TOPIC:
+{topic}
+
+REQUIREMENT NEED:
+{need}
+
+EVIDENCE URL:
+{url}
+
+EVIDENCE CONTENT:
+{content[:5000]}
+
+TASK:
+Determine whether this document substantively provides evidence for the
+specific requirement above.
+
+IMPORTANT:
+- Judge ONLY from the supplied evidence content.
+- Do not use general knowledge.
+- A document merely mentioning the entity/topic is NOT sufficient.
+- Configuration information is not sufficient for a performance requirement.
+- General metadata is not sufficient for a technical requirement.
+- The document must contain substantive information that contributes to
+  answering one or more parts of the stated requirement.
+- A document does NOT need to satisfy the entire requirement by itself.
+- If the requirement contains multiple factual components, fields,
+  attributes, or sub-requirements, mark the document relevant if it
+  provides reliable evidence for ANY one or more of those components.
+- Partial evidence is relevant evidence.
+- Do NOT reject a document merely because another requested component
+  is missing from that document.
+- Overall completeness must be determined later by evidence aggregation,
+  fact extraction, and requirement coverage.
+- Reject the document only when it provides no substantive information
+  that contributes to the requirement, or when the content is clearly
+  unrelated or unusable.
+
+Return ONLY valid JSON:
+
+{{"relevant": true_or_false, "reason": "short reason"}}
+"""
+
+            try:
+                result = self.llm.analyze(
+                    system_prompt=(
+                        "You are a strict evidence relevance classifier. "
+                        "Use only the supplied document. "
+                        "Never infer missing evidence from general knowledge."
+                    ),
+                    user_query=prompt,
+                    temperature=0.0,
+                )
+
+                raw = result.get("content", "").strip()
+
+                import json
+                parsed = None
+
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    # Tolerate a JSON object embedded in a response.
+                    start = raw.find("{")
+                    end = raw.rfind("}")
+                    if start >= 0 and end > start:
+                        try:
+                            parsed = json.loads(raw[start:end + 1])
+                        except Exception:
+                            parsed = None
+
+                relevant = (
+                    isinstance(parsed, dict)
+                    and parsed.get("relevant") is True
+                )
+                reason = (
+                    parsed.get("reason", "no reason")
+                    if isinstance(parsed, dict)
+                    else "invalid validator response"
+                )
+
+            except Exception as exc:
+                relevant = False
+                reason = f"validator_error:{type(exc).__name__}"
+
+            logger.info(
+                "[AUDIT EVIDENCE GATE] topic=%s url=%s decision=%s reason=%s",
+                topic,
+                url,
+                "ACCEPT" if relevant else "REJECT",
+                reason,
+            )
+
+            if relevant:
+                validated.append(ev)
+
+        logger.info(
+            "[AUDIT EVIDENCE GATE SUMMARY] topic=%s accepted=%d rejected=%d total=%d",
+            topic,
+            len(validated),
+            len(evidence) - len(validated),
+            len(evidence),
+        )
+
+        return validated
+
+
+    @staticmethod
+    def _source_policy(goal: str) -> dict:
+        """Allow media only when the user explicitly asks for it."""
+        text = (goal or "").lower()
+        video_terms = (
+            "youtube", "youtu.be", "video", "video review", "review video",
+            "demo", "sound test", "tes suara", "pengamatan", "tonton",
+        )
+        social_terms = (
+            "tiktok", "instagram", "facebook", "social media", "media sosial",
+        )
+        return {
+            "allow_video": any(term in text for term in video_terms),
+            "allow_social": any(term in text for term in social_terms),
+        }
+
+    def research(self, goal: str, context: str = "", attachments: list | None = None) -> dict:
+        profiler = TokenProfiler()
+        req_id = init_request_id()
+
+        # Capability selection is separate from research planning.
+        selected_skill = self.skill_router.select(goal)
+        logger.info(
+            "[skill-router] req_id=%s selected=%s score=%s",
+            req_id,
+            selected_skill["name"] if selected_skill else None,
+            selected_skill["score"] if selected_skill else None,
+        )
+
+        # Persistent user memory.
+        # Memory is user context, NOT research evidence.
+        logger.info(
+            "[AUDIT MEMORY QUERY] req_id=%s goal=%r",
+            req_id,
+            goal,
+        )
+        memory_results = self.user_memory.search(goal)
+
+        memory_context = ""
+        if memory_results:
+            memory_context = "\n".join(
+                f"- {m['topic']}: {m['field']} = {m['value']}"
+                for m in memory_results[:10]
+            )
+
+            logger.info(
+                "[USER MEMORY] req_id=%s matches=%d",
+                req_id,
+                len(memory_results),
+            )
+
+        log_event(
+            "research_start",
+            {
+                "goal": goal,
+            },
+        )
+        latency = LatencyProfiler()
+
+        # Request-local fact snapshot.
+        # Persistent KG tetap menyimpan historical facts, tetapi synthesis
+        # hanya boleh memakai facts yang dihasilkan pada research run ini.
+        request_facts = {}
+        request_facts_lock = threading.Lock()
+
+        t0_total = time.time()
+
+        logger.info(
+            "[AUDIT RESEARCH ATTACHMENTS] count=%d types=%s contents=%s",
+            len(attachments or []),
+            [
+                e.get("source_type") or e.get("evidence_type") or e.get("doc_type")
+                for e in (attachments or [])
+                if isinstance(e, dict)
+            ],
+            [
+                len(e.get("content", ""))
+                for e in (attachments or [])
+                if isinstance(e, dict)
+            ],
+        )
+
+        # 1. Plan
+        
+        route = self.router.route(goal, has_context=bool(context.strip()))
+
+        logger.info(
+            "[router] mode=%s reason=%s conf=%.2f",
+            route.mode,
+            route.reason,
+            route.confidence,
+        )
+
+        if route.mode == "direct":
+            logger.info("[router] bypass planner/search")
+
+            attachment_context = ""
+            if attachments:
+                attachment_context = "\n\n".join(
+                    e.get("content", "").strip()
+                    for e in attachments
+                    if isinstance(e, dict) and e.get("content")
+                )
+
+                if attachment_context:
+                    logger.info(
+                        "[AUDIT DIRECT ATTACHMENT] documents=%d chars=%d",
+                        len(attachments),
+                        len(attachment_context),
+                    )
+
+            direct_query = goal
+
+            if attachment_context:
+                direct_query += (
+                    "\n\n"
+                    "USER ATTACHMENT EVIDENCE:\n"
+                    f"{attachment_context}"
+                )
+
+            if memory_context:
+                direct_query += (
+                    "\n\n"
+                    "PERSISTENT USER MEMORY:\n"
+                    f"{memory_context}"
+                )
+
+            result = self.llm.analyze(
+                system_prompt=(
+                    "You are a precise technical assistant. "
+                    "Answer directly and concisely. "
+                    "Use only facts provided by the user. "
+                    "Treat USER ATTACHMENT EVIDENCE as user-provided evidence. "
+                    "Do not invent missing facts, labels, constraints, or assumptions. "
+                    "For logic and reasoning problems, distinguish facts from assumptions. "
+                    "If the information is insufficient for a unique answer, say so clearly "
+                    "and identify what information is missing. "
+                    "Do not search the web. "
+                    "Do not use the research pipeline."
+                ),
+                user_query=direct_query,
+                temperature=0.2,
+            )
+
+            return result["content"]
+
+
+        # KnowledgeGraph is research-only. Direct requests must not acquire
+        # the global KG lock.
+        kg = KnowledgeGraph()
+
+        logger.info(
+            "[AUDIT KG LOAD] pre_existing_nodes=%d pre_existing_facts=%d",
+            len(kg.graph["nodes"]),
+            sum(len(n.get("facts", [])) for n in kg.graph["nodes"].values()),
+        )
+
+        logger.info(f"[orchestrator] planning: {goal[:80]}")
+        latency.start("planner")
+        plan = self.task_planner.plan(goal, context=context)
+        profiler.add("planner", {"tokens_input": 0, "tokens_output": 0, "api_cost": 0})
+        # Do not let CompletenessChecker expand a plan produced by the
+        # deterministic TaskPlanner fallback. The fallback exists because
+        # structured planning failed; allowing another LLM to mutate that
+        # degraded plan can create requirements outside the active request.
+        if (
+            not plan.get("planner_fallback")
+            and (
+                plan.get("confidence", 0) < 0.7
+                or len(plan.get("knowledge_required", [])) > 3
+            )
+        ):
+            plan = self.completeness.check(plan)
+        elif plan.get("planner_fallback"):
+            logger.info(
+                "[AUDIT COMPLETENESS SKIP] planner_fallback=True "
+                "requirements=%d",
+                len(plan.get("knowledge_required", [])),
+            )
+        latency.stop("planner")
+
+        log_event(
+            "planner_done",
+            {
+                "confidence": plan.get("confidence"),
+                "requirements": len(plan.get("knowledge_required", [])),
+            },
+        )
+
+        num_requirements = len(plan.get("knowledge_required", []))
+        force_research = num_requirements >= self.RESEARCH_THRESHOLD
+        profiler.set_metadata(nodes=num_requirements)
+
+        # Preserve URLs explicitly supplied by the user so the research
+        # pipeline can fetch the exact target instead of searching for
+        # generic methods to access it.
+        direct_urls = re.findall(r'https?://[^\s<>"]+', goal)
+
+        if direct_urls:
+            logger.info(
+                "[AUDIT DIRECT URL INPUT] req_id=%s urls=%s",
+                req_id,
+                direct_urls,
+            )
+
+        # 2. Build requirement graph
+        kg.add_node(goal, node_type="project", status="planned")
+        requirement_map = {}
+        for k in plan.get("knowledge_required", []):
+            req_id = self._make_requirement_id(k["topic"], k["need"])
+            requirement_map[req_id] = k
+            kg.add_node(req_id, status="planned", confidence=0.7)
+            kg.add_relation(goal, "requires", req_id)
+            for dep_topic in k.get("depends_on", []):
+                for k2 in plan.get("knowledge_required", []):
+                    if k2["topic"] == dep_topic:
+                        dep_req_id = self._make_requirement_id(k2["topic"], k2["need"])
+                        kg.add_relation(req_id, "depends_on", dep_req_id)
+                        break
+
+        request_scope = set(requirement_map.keys()) | {goal}
+        source_policy = self._source_policy(goal)
+        logger.info(
+            "[SOURCE POLICY] video=%s social=%s goal=%r",
+            source_policy["allow_video"],
+            source_policy["allow_social"],
+            goal[:120],
+        )
+
+        all_evidence = []
+
+        # Request-local fetch cache.
+        # A direct user URL must be fetched only once per research request.
+        request_fetch_cache = {}
+        attachment_evidence = [
+            {**e, "req_id": "attachment"}
+            for e in (attachments or [])
+            if isinstance(e, dict) and e.get("content")
+        ]
+        if attachment_evidence:
+            logger.info(
+                "[AUDIT ATTACHMENT EVIDENCE] documents=%d chars=%d",
+                len(attachment_evidence),
+                sum(len(e.get("content", "")) for e in attachment_evidence),
+            )
+        iterations_completed = 0
+        retry_count = {}
+
+        # 2.5 Direct URL preload
+        #
+        # Explicit URLs supplied by the user are request-level HARD TARGETS.
+        # Fetch each target exactly once before requirement execution so
+        # parallel planner requirements cannot race and invoke the same
+        # connector repeatedly.
+        request_fetch_cache = {}
+
+        if direct_urls:
+            preload_urls = list(dict.fromkeys(direct_urls))
+
+            logger.info(
+                "[AUDIT DIRECT PRELOAD] req_id=%s urls=%s",
+                req_id,
+                preload_urls,
+            )
+
+            preload_results = self._fetch_url_parallel(
+                preload_urls,
+                set(),
+                goal,
+            )
+
+            for evidence in preload_results:
+                url = evidence.get("url")
+                if url:
+                    request_fetch_cache[url] = evidence
+
+                    evidence_copy = {
+                        **evidence,
+                        "req_id": "direct_url",
+                    }
+                    all_evidence.append(evidence_copy)
+
+            logger.info(
+                "[AUDIT DIRECT PRELOAD DONE] req_id=%s fetched=%d urls=%s",
+                req_id,
+                len(request_fetch_cache),
+                list(request_fetch_cache.keys()),
+            )
+
+        # 3. Graph-driven loop
+        # IMPORTANT: execution scope must come only from the current request plan.
+        # Persistent KG is memory, not a source of tasks for this request.
+        def request_ready_nodes():
+            ready = []
+
+            # AUDIT ONLY: jangan mengubah keputusan readiness.
+            logger.info(
+                "[AUDIT READY INIT] requirements=%d nodes=%d",
+                len(requirement_map),
+                len(kg.graph.get("nodes", {})),
+            )
+
+
+            for req_id, k in requirement_map.items():
+                node = kg.graph["nodes"].get(req_id, {})
+                status = node.get("status", "MISSING_NODE")
+                deps = k.get("depends_on", [])
+
+                # Persistent KG status is historical state only.
+                # It must NOT mark this requirement complete for the
+                # current request. Current-request evidence/facts are
+                # evaluated later by the request-local audit.
+                if status in ("found", "verified"):
+                    logger.info(
+                        "[AUDIT REQ NODE] req_id=%s status=%s deps=%s "
+                        "decision=EXECUTE_CURRENT_PERSISTENT_COMPLETE",
+                        req_id,
+                        status,
+                        deps,
+                    )
+
+                retries = retry_count.get(req_id, 0)
+                if retries >= self.MAX_RETRIES:
+                    logger.info(
+                        "[AUDIT REQ NODE] req_id=%s status=%s deps=%s retries=%d "
+                        "decision=SKIP_MAX_RETRIES",
+                        req_id,
+                        status,
+                        deps,
+                        retries,
+                    )
+                    continue
+
+                dependencies_met = True
+                blocked_by = None
+
+                for dep_topic in deps:
+                    dep_req_id = None
+
+                    for k2 in plan.get("knowledge_required", []):
+                        if k2["topic"] == dep_topic:
+                            dep_req_id = self._make_requirement_id(
+                                k2["topic"],
+                                k2["need"],
+                            )
+                            break
+
+                    if dep_req_id:
+                        dep_node = kg.graph["nodes"].get(dep_req_id, {})
+                        dep_status = dep_node.get("status", "MISSING_NODE")
+
+                        if dep_status not in ("found", "verified"):
+                            dependencies_met = False
+                            blocked_by = f"{dep_req_id}:{dep_status}"
+                            break
+
+                    else:
+                        logger.warning(
+                            "[AUDIT REQ DEP MISSING] req_id=%s dep_topic=%s",
+                            req_id,
+                            dep_topic,
+                        )
+
+                decision = "READY" if dependencies_met else "BLOCKED"
+
+                logger.info(
+                    "[AUDIT REQ NODE] req_id=%s status=%s deps=%s retries=%d "
+                    "dependencies_met=%s blocked_by=%s decision=%s",
+                    req_id,
+                    status,
+                    deps,
+                    retries,
+                    dependencies_met,
+                    blocked_by,
+                    decision,
+                )
+
+                if dependencies_met:
+                    ready.append({
+                        "topic": req_id,
+                        "relation": "requires",
+                        "status": status,
+                    })
+
+            logger.info(
+                "[AUDIT READY NODES] ready=%d total_requirements=%d",
+                len(ready),
+                len(requirement_map),
+            )
+
+            return ready
+
+        while iterations_completed < self.MAX_ITERATIONS:
+            ready = request_ready_nodes()
+
+            if not ready:
+                logger.info(f"[orchestrator] all requirements complete or blocked")
+                break
+
+            batch = ready[:self.PARALLEL_NODES]
+
+            log_event(
+                "iteration_start",
+                {
+                    "iteration": iterations_completed + 1,
+                    "ready_nodes": len(batch),
+                },
+            )
+
+            logger.info(f"[orchestrator] iteration {iterations_completed + 1}: {len(batch)} nodes")
+
+            new_evidence_count = 0
+
+            def process_node(node_info):
+                nonlocal new_evidence_count
+                req_id = node_info["topic"]
+                retries = retry_count.get(req_id, 0)
+                if retries >= self.MAX_RETRIES:
+                    kg.update_status(req_id, "failed")
+                    return 0
+                kg.update_status(req_id, "searching")
+                kg.increment_search(req_id)
+                retry_count[req_id] = retries + 1
+                k = requirement_map.get(req_id, {"topic": req_id, "need": "documentation"})
+                topic = k["topic"]
+                need = k.get("need", "documentation")
+                strategy = self._get_strategy(topic, need)
+
+                latency.start("search_api")
+
+                log_event(
+                    "search_start",
+                    {
+                        "topic": topic,
+                        "need": need,
+                    },
+                )
+
+                # User-provided attachment evidence is request-local input.
+                # It supplements web evidence; it does not replace the search path.
+                attachment_for_req = []
+                if attachment_evidence:
+                    attachment_for_req = self._validate_evidence_relevance(
+                        topic,
+                        need,
+                        attachment_evidence,
+                    )
+                    for evidence in attachment_for_req:
+                        evidence_copy = {**evidence, "req_id": req_id}
+                        all_evidence.append(evidence_copy)
+                    logger.info(
+                        "[AUDIT ATTACHMENT MATCH] req_id=%s topic=%s accepted=%d",
+                        req_id,
+                        topic,
+                        len(attachment_for_req),
+                    )
+
+                    # ATTACHMENT GATE:
+                    # User-provided evidence gets one extraction attempt before web search.
+                    # If it sufficiently covers the requirement, skip web research.
+                    # If insufficient, the existing search path remains unchanged.
+                    if attachment_for_req:
+                        logger.info(
+                            "[AUDIT ATTACHMENT EXTRACTION] req_id=%s topic=%s documents=%d",
+                            req_id,
+                            topic,
+                            len(attachment_for_req),
+                        )
+
+                        latency.start("extract")
+                        t0 = time.time()
+
+                        checklist = [{"field_id": "facts", "label": "All facts"}]
+
+                        new_facts, usage = self.facts.extract_facts_batch(
+                            attachment_for_req,
+                            checklist,
+                        )
+
+                        ranked = self.ranker.rank(
+                            new_facts,
+                            f"{topic} {need}",
+                        )
+                        ranked = dict(ranked.items())
+
+                        eval_result = self.facts.evaluate(
+                            [{"field_id": k, "label": k} for k in ranked.keys()],
+                            ranked,
+                            attachment_for_req,
+                        )
+
+                        profiler.add(
+                            "extract",
+                            usage,
+                            (time.time() - t0) * 1000,
+                        )
+                        profiler.add_facts("extract", len(ranked))
+                        latency.stop("extract")
+
+                        logger.info(
+                            "[AUDIT ATTACHMENT COVERAGE] req_id=%s topic=%s "
+                            "facts=%d coverage=%.1f%%",
+                            req_id,
+                            topic,
+                            len(ranked),
+                            eval_result["coverage_pct"],
+                        )
+
+                        if eval_result["coverage_pct"] >= self.MIN_COVERAGE:
+                            kg.learn(req_id, ranked, plan)
+
+                            with request_facts_lock:
+                                for field, fact in ranked.items():
+                                    if isinstance(fact, dict):
+                                        request_facts[f"{req_id}/{field}"] = {
+                                            "value": fact.get("value"),
+                                            "source": fact.get("source", "unknown"),
+                                            "source_type": fact.get(
+                                                "source_type",
+                                                "user_attachment",
+                                            ),
+                                        }
+
+                            kg.update_status(req_id, "found")
+
+                            logger.info(
+                                "[AUDIT ATTACHMENT GATE] req_id=%s "
+                                "decision=SUFFICIENT skip_web_search=true",
+                                req_id,
+                            )
+
+                            return 1
+
+                        logger.info(
+                            "[AUDIT ATTACHMENT GATE] req_id=%s "
+                            "decision=INSUFFICIENT continue_web_search=true",
+                            req_id,
+                        )
+
+                # Research always requires a search capability.
+                # Resolve the skill before applying the fallback.
+                selected_skill = self.skill_router.select(topic)
+
+                # Semantic skill router may return None for a valid research topic.
+                # Fall back to the already-registered agent-reach executor.
+                if selected_skill is None:
+                    selected_skill = {
+                        "name": "agent-reach",
+                        "description": "Agent Reach internet capability router",
+                        "category": "search",
+                    }
+                    logger.info(
+                        "[skill-router] no match; research fallback=agent-reach topic=%s",
+                        topic,
+                    )
+
+                logger.info(
+                    "[AUDIT SKILL SELECT] req_id=%s topic=%s selected=%s",
+                    req_id,
+                    topic,
+                    selected_skill,
+                )
+
+                import re
+
+                # Preserve user-provided URLs as direct research evidence.
+                # Search results remain unchanged; direct URLs are added
+                # to the same existing fetch pipeline.
+                all_urls = list(direct_urls)
+
+                if all_urls:
+                    logger.info(
+                        "[AUDIT DIRECT URL] req_id=%s topic=%s urls=%s",
+                        req_id,
+                        topic,
+                        all_urls,
+                    )
+
+                def search_one(q):
+                    if selected_skill is None:
+                        logger.warning(
+                            "[AUDIT SKILL SELECT] req_id=%s topic=%s "
+                            "no_skill_selected query=%s",
+                            req_id,
+                            topic,
+                            q,
+                        )
+                        return []
+
+                    results = self.skill_bridge.execute_selected(
+                        selected_skill,
+                        q,
+                        sources=["searxng"],
+                        allow_video=source_policy["allow_video"],
+                        allow_social=source_policy["allow_social"],
+                    )
+
+                    if not results or not isinstance(results, dict):
+                        logger.warning(
+                            "[AUDIT SKILL EXEC] req_id=%s query=%s "
+                            "invalid_result=%r",
+                            req_id,
+                            q,
+                            results,
+                        )
+                        return []
+
+                    result_text = results.get("result", "")
+
+                    if not isinstance(result_text, str):
+                        result_text = str(result_text or "")
+
+                    import re
+                    return re.findall(r'(https?://[^\s\n]+)', result_text)
+                # Direct user URLs are HARD TARGETS.
+                # Fetch the exact target first instead of searching for generic
+                # procedures to access the target.
+                if direct_urls:
+                    logger.info(
+                        "[AUDIT DIRECT TARGET MODE] req_id=%s topic=%s urls=%s",
+                        req_id,
+                        topic,
+                        direct_urls,
+                    )
+                    all_urls = list(direct_urls)
+                else:
+                    with ThreadPoolExecutor(max_workers=2) as ex:
+                        futs = [
+                            ex.submit(search_one, q)
+                            for q in strategy.get(
+                                "search_queries",
+                                [f"{topic} {need}"],
+                            )[:2]
+                        ]
+                        for fu in as_completed(futs):
+                            all_urls.extend(fu.result())
+
+                # Score, deduplicate and limit URLs
+                seen = set()
+                unique_urls = []
+
+                for u in all_urls:
+                    if u in seen:
+                        continue
+                    seen.add(u)
+                    unique_urls.append(u)
+
+                unique_urls.sort(
+                    key=lambda u: self.strategy.score_url(u, strategy),
+                    reverse=True,
+                )
+
+                logger.info(
+                    "[AUDIT CANDIDATES] req_id=%s topic=%s candidates=%d",
+                    req_id,
+                    topic,
+                    len(unique_urls),
+                )
+
+                for rank, url in enumerate(unique_urls[:15], 1):
+                    logger.info(
+                        "[AUDIT CANDIDATE] req_id=%s rank=%d score=%.2f url=%s",
+                        req_id,
+                        rank,
+                        self.strategy.score_url(url, strategy),
+                        url,
+                    )
+
+                selected_urls = []
+                mdn_selected = False
+
+                # Explicit user URLs have absolute priority.
+                # They are the exact targets requested by the user and must not
+                # be rejected by generic search-result scoring.
+                for u in direct_urls:
+                    if u in unique_urls and u not in selected_urls:
+                        selected_urls.append(u)
+
+                for u in unique_urls:
+                    if u in direct_urls:
+                        continue
+
+                    if self.strategy.score_url(u, strategy) < 0.30:
+                        continue
+
+                    host = urlparse(u).netloc.lower().split(":")[0]
+
+                    # Keep at most one MDN result.
+                    if host == "developer.mozilla.org":
+                        if mdn_selected:
+                            continue
+                        mdn_selected = True
+
+                    selected_urls.append(u)
+
+                    if len(selected_urls) >= 5:
+                        break
+
+                all_urls = selected_urls
+
+                latency.stop("search_api")
+
+                log_event(
+                    "search_done",
+                    {
+                        "topic": topic,
+                        "urls": len(all_urls),
+                    },
+                )
+
+                latency.start("fetch")
+
+                # P0-1: URL deduplication remains global for HTTP fetching,
+                # but evidence ownership is per requirement.
+                #
+                # If a URL was already fetched for another requirement,
+                # reuse its processed document instead of fetching it again.
+                # A separate dict copy receives the current req_id so the
+                # requirement can independently consume the evidence.
+                existing_by_url = {
+                    e.get("url"): e
+                    for e in all_evidence
+                    if e.get("url")
+                }
+
+                # Request-local cache prevents the same direct URL from
+                # being fetched repeatedly by multiple planner requirements.
+                new_urls = [
+                    u for u in all_urls
+                    if u not in existing_by_url
+                    and u not in request_fetch_cache
+                ]
+
+                if new_urls:
+                    logger.info(
+                        "[AUDIT FETCH NEW] req_id=%s topic=%s urls=%s",
+                        req_id,
+                        topic,
+                        new_urls,
+                    )
+
+                    fetched_results = self._fetch_url_parallel(
+                        new_urls,
+                        set(),
+                        f"{topic} {need}",
+                    )
+
+                    for fetched in fetched_results:
+                        fetched_url = fetched.get("url")
+                        if fetched_url:
+                            request_fetch_cache[fetched_url] = fetched
+                else:
+                    fetched_results = []
+
+                fetched_by_url = {
+                    r.get("url"): r
+                    for r in fetched_results
+                    if r.get("url")
+                }
+
+                # Include request-local cached evidence.
+                fetched_by_url.update(request_fetch_cache)
+
+                evidence_for_req = list(attachment_for_req)
+
+                # Request-level HARD TARGET cache has highest priority.
+                # Direct user URLs were preloaded before requirement execution,
+                # so requirements must reuse that evidence instead of fetching
+                # the same target through the connector again.
+                for url in all_urls:
+                    if url in request_fetch_cache:
+                        evidence = request_fetch_cache[url]
+                        evidence_copy = {
+                            **evidence,
+                            "req_id": req_id,
+                        }
+                        all_evidence.append(evidence_copy)
+                        evidence_for_req.append(evidence_copy)
+
+                        logger.info(
+                            "[AUDIT DIRECT EVIDENCE REUSE] req_id=%s topic=%s url=%s",
+                            req_id,
+                            topic,
+                            url,
+                        )
+
+                for url in all_urls:
+                    if url in request_fetch_cache:
+                        continue
+
+                    if url in fetched_by_url:
+                        evidence = fetched_by_url[url]
+                        evidence_copy = {
+                            **evidence,
+                            "req_id": req_id,
+                        }
+                        all_evidence.append(evidence_copy)
+                        evidence_for_req.append(evidence_copy)
+
+                    elif url in existing_by_url:
+                        # Reuse already fetched/processed evidence.
+                        evidence = existing_by_url[url]
+                        evidence_copy = {
+                            **evidence,
+                            "req_id": req_id,
+                        }
+                        all_evidence.append(evidence_copy)
+                        evidence_for_req.append(evidence_copy)
+
+                        logger.info(
+                            "[AUDIT EVIDENCE REUSE] req_id=%s topic=%s url=%s",
+                            req_id,
+                            topic,
+                            url,
+                        )
+
+                latency.stop("fetch")
+
+                log_event(
+                    "fetch_done",
+                    {
+                        "topic": topic,
+                        "urls_requested": len(all_urls),
+                        "urls_new": len(new_urls),
+                        "documents_fetched": len(fetched_results),
+                        "documents_for_requirement": len(evidence_for_req),
+                    },
+                )
+
+                if evidence_for_req:
+
+                    logger.info(
+                        "[AUDIT REQUIREMENT EVIDENCE] req_id=%s topic=%s "
+                        "fetched=%d evidence_for_req=%d urls=%s",
+                        req_id,
+                        topic,
+                        len(fetched_results),
+                        len(evidence_for_req),
+                        [e.get("url") for e in evidence_for_req],
+                    )
+
+                    # P0: validate evidence against the CURRENT requirement
+                    # before allowing fact extraction.
+                    validated_evidence = self._validate_evidence_relevance(
+                        topic,
+                        need,
+                        evidence_for_req,
+                    )
+
+                    if not validated_evidence:
+                        logger.warning(
+                            "[AUDIT REQUIREMENT EVIDENCE GAP] "
+                            "req_id=%s topic=%s reason=no_relevant_evidence",
+                            req_id,
+                            topic,
+                        )
+                        kg.update_status(req_id, "partial")
+                        return 0
+
+                    evidence_for_req = validated_evidence
+
+                    logger.info(
+                        "[AUDIT REQUIREMENT EVIDENCE ACCEPTED] "
+                        "req_id=%s topic=%s accepted=%d urls=%s",
+                        req_id,
+                        topic,
+                        len(evidence_for_req),
+                        [e.get("url") for e in evidence_for_req],
+                    )
+
+                    latency.start("extract")
+
+                    log_event(
+                        "extract_start",
+                        {
+                            "topic": topic,
+                            "documents": len(evidence_for_req),
+                        },
+                    )
+
+                    t0 = time.time()
+                    checklist = [{"field_id": "facts", "label": "All facts"}]
+
+                    logger.info("=" * 80)
+                    logger.info(
+                        "[DEBUG] Before extract_facts_batch req_id=%s",
+                        req_id,
+                    )
+
+                    for idx, ev in enumerate(evidence_for_req):
+                        logger.info(
+                            "[EVIDENCE %d]\nURL=%s\nCONTENT=\n%s",
+                            idx,
+                            ev.get("url"),
+                            ev.get("content", "")[:800],
+                        )
+
+                    logger.info("=" * 80)
+
+                    new_facts, usage = self.facts.extract_facts_batch(
+                        evidence_for_req,
+                        checklist,
+                    )
+
+                    if not new_facts:
+                        logger.warning(
+                            "[AUDIT EXTRACTION EMPTY] req_id=%s topic=%s evidence=%d",
+                            req_id,
+                            topic,
+                            len(evidence_for_req),
+                        )
+                        kg.update_status(req_id, "partial")
+                        latency.stop("extract")
+                        return 0
+
+                    logger.info(
+                        "[EXTRACT RESULT] req_id=%s count=%d",
+                        req_id,
+                        len(new_facts),
+                    )
+
+                    acr_sample = [
+                        f for f in new_facts
+                        if any(
+                            k in str(f).lower()
+                            for k in ["acr", "55", "450", "qts", "woofer"]
+                        )
+                    ]
+
+                    logger.info(
+                        "[EXTRACT ACR FACTS] count=%d sample=%s",
+                        len(acr_sample),
+                        acr_sample[:3],
+                    )
+
+                    profiler.add(
+                        "extract",
+                        usage,
+                        (time.time() - t0) * 1000,
+                    )
+
+                    ranked = self.ranker.rank(
+                        new_facts,
+                        f"{topic} {need}",
+                    )
+
+                    # PATCH: simpan seluruh fakta hasil ranking.
+                    # Jangan dipotong di level node.
+                    ranked = dict(ranked.items())
+
+                    logger.info(
+                        "[AUDIT RANKED FACTS] req_id=%s topic=%s count=%d fields=%s",
+                        req_id,
+                        topic,
+                        len(ranked),
+                        list(ranked.keys()),
+                    )
+
+                    profiler.add_facts("extract", len(ranked))
+
+                    eval_result = self.facts.evaluate(
+                        [{"field_id": k, "label": k} for k in ranked.keys()],
+                        ranked,
+                        evidence_for_req,
+                    )
+
+                    logger.info(
+                        "[AUDIT FACT COVERAGE DETAIL] req_id=%s "
+                        "ranked=%d coverage=%.1f%% min_required=%.1f "
+                        "fields=%s",
+                        req_id,
+                        len(ranked),
+                        eval_result.get("coverage_pct", 0.0),
+                        self.MIN_COVERAGE,
+                        list(ranked.keys()),
+                    )
+
+                    latency.stop("extract")
+
+                    log_event(
+                        "extract_done",
+                        {
+                            "topic": topic,
+                            "facts": len(ranked),
+                            "coverage": eval_result["coverage_pct"],
+                        },
+                    )
+
+                    if eval_result["coverage_pct"] >= self.MIN_COVERAGE:
+                        kg.learn(req_id, ranked, plan)
+
+                        # Simpan hanya facts hasil extraction run ini.
+                        # Historical facts di persistent KG tidak masuk
+                        # ke synthesis.
+                        with request_facts_lock:
+                            for field, fact in ranked.items():
+                                if isinstance(fact, dict):
+                                    request_facts[f"{req_id}/{field}"] = {
+                                        "value": fact.get("value"),
+                                        "source": fact.get("source", "unknown"),
+                                        "source_type": fact.get("source_type", "other"),
+                                    }
+
+                        kg.update_status(req_id, "found")
+                    else:
+                        kg.update_status(req_id, "partial")
+
+                    return 1
+
+                return 0
+
+            with ThreadPoolExecutor(max_workers=min(len(batch), self.MAX_WORKERS)) as executor:
+                node_futures = [
+                    executor.submit(contextvars.copy_context().run, process_node, ni)
+                    for ni in batch
+                ]
+                for future in as_completed(node_futures):
+                    new_evidence_count += future.result()
+
+            # FIX: increment SEBELUM early stop check
+            iterations_completed += 1
+
+            total_f = self._total_facts(kg, request_scope)
+            coverage = self._coverage(kg, request_scope)
+
+            # PROBE ONLY: requirement coverage must be measured separately
+            # from KG fact coverage. Do not change termination behavior yet.
+            requirement_total = len(requirement_map)
+            requirement_found = sum(
+                1
+                for req_id in requirement_map
+                if kg.graph["nodes"].get(req_id, {}).get("status")
+                in ("found", "verified")
+            )
+            requirement_coverage = (
+                (requirement_found / requirement_total) * 100
+                if requirement_total
+                else 100.0
+            )
+
+            logger.info(
+                "[AUDIT REQUIREMENT COVERAGE LOOP] "
+                "found=%d total=%d coverage=%.1f%% facts=%d kg_coverage=%.1f%%",
+                requirement_found,
+                requirement_total,
+                requirement_coverage,
+                total_f,
+                coverage,
+            )
+            if total_f >= self.MAX_TOTAL_FACTS:
+                logger.info(f"[orchestrator] early stop: {total_f} facts")
+                break
+            if coverage >= self.EARLY_STOP_COVERAGE and total_f >= self.MIN_FACTS_TO_STOP:
+                logger.info(f"[orchestrator] early stop: coverage={coverage:.0f}% with {total_f} facts")
+                break
+
+            if new_evidence_count == 0 and iterations_completed >= 3:
+                logger.info(f"[orchestrator] no new evidence, stopping")
+                break
+
+        log_event(
+            "iteration_done",
+            {
+                "iterations": iterations_completed,
+                "facts": self._total_facts(kg, request_scope),
+                "coverage": self._coverage(kg, request_scope),
+            },
+        )
+
+        profiler.set_metadata(iterations=iterations_completed)
+        pipeline_type = "research" if iterations_completed > 0 else "direct"
+
+        # 4. Build answer
+        # Synthesis hanya memakai facts yang dibuat selama research run ini.
+        # Persistent KnowledgeGraph tetap menyimpan historical facts.
+        all_facts = dict(request_facts)
+
+        _this_request_nodes = set(requirement_map.keys()) | {goal}
+        _own = sum(
+            1 for k in all_facts
+            if k.split("/", 1)[0] in _this_request_nodes
+        )
+
+        # AUDIT ONLY: ukur coverage requirement berdasarkan evidence dan facts
+        # current request. Belum mengubah keputusan synthesis.
+        requirement_audit = []
+
+        for req_id, req in requirement_map.items():
+            node = kg.graph["nodes"].get(req_id, {})
+            facts = node.get("facts", [])
+            status = node.get("status")
+
+            evidence_count = sum(
+                1 for e in all_evidence
+                if e.get("req_id") == req_id
+            )
+
+            requirement_audit.append({
+                "req_id": req_id,
+                "topic": req.get("topic", req_id) if isinstance(req, dict) else str(req),
+                "status": status,
+                "evidence": evidence_count,
+                "facts": len(facts),
+            })
+
+        with_evidence = sum(
+            1 for r in requirement_audit if r["evidence"] > 0
+        )
+        with_facts = sum(
+            1 for r in requirement_audit if r["facts"] > 0
+        )
+        missing = [
+            r for r in requirement_audit
+            if r["evidence"] == 0 or r["facts"] == 0
+        ]
+
+        logger.info(
+            "[AUDIT REQUIREMENT COVERAGE] total=%d with_evidence=%d "
+            "with_facts=%d missing=%d",
+            len(requirement_audit),
+            with_evidence,
+            with_facts,
+            len(missing),
+        )
+
+        for r in missing:
+            logger.info(
+                "[AUDIT REQUIREMENT MISSING] req_id=%s topic=%s "
+                "status=%s evidence=%d facts=%d",
+                r["req_id"],
+                r["topic"],
+                r["status"],
+                r["evidence"],
+                r["facts"],
+            )
+
+        logger.info(
+            "[AUDIT SYNTHESIS] total_all_facts=%d own_request_facts=%d foreign_facts=%d "
+            "nodes_this_request=%d nodes_total_in_kg=%d",
+            len(all_facts), _own, len(all_facts) - _own,
+            len(_this_request_nodes), len(kg.graph["nodes"]),
+        )
+
+        # Facts already carry the primary evidence.  Keep a compact raw
+        # excerpt only from sources that actually produced facts, so the
+        # synthesis prompt is not inflated by duplicate search results.
+        synthesis_evidence = [e for e in all_evidence if e.get("had_facts")]
+        if not synthesis_evidence:
+            synthesis_evidence = all_evidence
+        evidence_text = "\n\n".join([
+            f"[{e.get('doc_type','?')}] {e['url']}\n{e['content'][:400]}"
+            for e in synthesis_evidence[:4]
+        ])
+        compact_facts = json.dumps(
+            all_facts,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        logger.info(
+            "[TOKEN OPTIMIZATION] synthesis facts_chars=%d evidence_sources=%d evidence_chars=%d",
+            len(compact_facts),
+            min(len(synthesis_evidence), 4),
+            len(evidence_text),
+        )
+
+        system_prompt = f"""Technical Research Assistant.
+📊 {len(all_facts)} facts collected.
+
+PERSISTENT USER MEMORY:
+{memory_context or "(none)"}
+
+Treat PERSISTENT USER MEMORY as user-provided context only.
+Do NOT treat it as research evidence or add it to EXTRACTED FACTS.
+Use it only to resolve user/project context when relevant.
+
+EXTRACTED FACTS:
+{compact_facts}
+
+SOURCE MATERIAL:
+{evidence_text}
+
+Gunakan EXTRACTED FACTS sebagai sumber utama.
+Gunakan SOURCE MATERIAL hanya bila diperlukan.
+Jangan mengarang.
+
+SOURCE CONTEXT MATCHING:
+1. Untuk setiap benchmark, measurement, atau performance figure, periksa apakah kondisi pengujiannya sesuai dengan kondisi yang diminta user.
+2. Jangan gunakan benchmark sebagai bukti langsung untuk kondisi user jika benchmark dilakukan pada kondisi yang berbeda secara material.
+3. Jika kondisi benchmark berbeda atau tidak diketahui, pertahankan fakta dan provenance-nya, tetapi jelaskan mismatch atau ketidakpastiannya.
+4. Fakta yang terverifikasi tidak otomatis berarti fakta tersebut applicable untuk requirement yang sedang dijawab.
+5. Jika kondisi yang diminta user tidak didukung secara langsung oleh sumber yang tersedia, nyatakan bahwa informasi tersebut belum didukung oleh sumber yang ditemukan.
+6. Jangan melakukan scaling, extrapolation, atau substitusi hasil benchmark untuk memperkirakan kondisi user kecuali sumber secara eksplisit mendukung inference tersebut.
+
+CONTOH:
+Jika kondisi user adalah 100 Mbps tetapi sumber hanya menunjukkan benchmark WireGuard 1011 Mbps pada test environment yang berbeda:
+BENAR: Benchmark melaporkan 1011 Mbps pada kondisi pengujian tersebut, tetapi tidak membuktikan performa pada link 100 Mbps.
+SALAH: Jangan menyatakan bahwa WireGuard cocok untuk 100 Mbps hanya karena benchmark mencapai 1011 Mbps.
+
+
+COMPARISON-FIRST REASONING:
+1. Jika user meminta perbandingan beberapa entity, protokol, produk, metode, atau alternatif, JANGAN memilih pemenang terlebih dahulu.
+2. Identifikasi kriteria perbandingan yang diminta user sebelum membuat kesimpulan.
+3. Untuk setiap kriteria, kumpulkan fakta yang tersedia untuk SETIAP entity yang dibandingkan.
+4. Bandingkan hanya fakta yang memiliki konteks dan kondisi pengukuran yang comparable.
+5. Jika sumber untuk suatu entity belum terkumpul untuk suatu kriteria, tandai sebagai "sumber belum ditemukan" dan jangan mengisi kekosongan dengan pengetahuan umum.
+6. Jika sumber berasal dari kondisi pengujian yang berbeda, jangan memperlakukannya sebagai perbandingan langsung. Jelaskan perbedaan konteksnya.
+7. Setelah comparison selesai, pisahkan dengan jelas:
+   - apa yang secara langsung didukung oleh sumber yang ditemukan,
+   - apa yang tidak dapat dibandingkan,
+   - dan apa yang dapat disimpulkan secara terbatas.
+8. REKOMENDASI hanya boleh dibuat SETELAH comparison selesai.
+9. Rekomendasi harus mengikuti hasil comparison, bukan menjadi tujuan yang dicari lalu didukung dengan fakta secara selektif.
+10. Jangan memilih satu entity sebagai "terbaik secara keseluruhan" jika sumber hanya menunjukkan keunggulan pada sebagian kriteria.
+11. Jika sumber yang ditemukan belum cukup untuk menentukan pemenang keseluruhan, katakan secara eksplisit bahwa pemenang keseluruhan tidak dapat ditentukan dari sumber yang ditemukan.
+12. Jangan menggunakan pengetahuan umum di luar sumber yang ditemukan untuk mengisi kekosongan atau memperkuat recommendation.
+13. Jangan membuat klaim teknis baru dari inferensi yang tidak dinyatakan oleh sumber yang ditemukan.
+14. Jangan membuat klaim absolut tentang karakteristik teknis, persyaratan sistem, atau performa pada kondisi spesifik yang tidak secara eksplisit diuji/disebutkan dalam sumber yang ditemukan.
+
+SOURCE SCOPE PRESERVATION:
+1. "Sumber tidak ditemukan" hanya boleh berarti sumber untuk entity/kriteria tersebut BELUM TERKUMPUL dalam research run ini.
+2. Jangan mengubahnya menjadi klaim bahwa informasi tersebut tidak ada di dunia nyata atau tidak pernah tersedia.
+3. Gunakan istilah "sumber belum ditemukan", "belum ditemukan dalam penelitian ini", atau "belum cukup untuk dibandingkan" bila cakupan research tidak lengkap.
+4. Jika Entity A memiliki sumber tetapi Entity B belum memiliki sumber, JANGAN menyimpulkan A unggul secara keseluruhan.
+5. Informasi yang belum ditemukan adalah celah informasi, bukan bukti negatif.
+6. Jangan memperlakukan ketiadaan fact sebagai bukti bahwa karakteristik entity tersebut buruk, lebih lambat, lebih mahal, kurang aman, atau lebih sulit.
+7. Jika kriteria penting belum memiliki sumber untuk semua entity, nyatakan bahwa comparison untuk kriteria tersebut belum lengkap.
+8. Jangan mengisi informasi yang belum ditemukan dengan general knowledge, asumsi teknis, atau inferensi.
+9. Jika research coverage belum lengkap, hasil synthesis harus mempertahankan status tersebut dan tidak boleh menyamarkan gap sebagai kesimpulan final.
+10. Rekomendasi hanya boleh memakai subset kriteria yang benar-benar memiliki sumber yang dapat dibandingkan.
+
+RECOMMENDATION FORMAT:
+- Comparison: ringkas hasil sumber yang ditemukan per kriteria.
+- Information gaps: sebutkan kriteria/entity yang belum memiliki sumber yang dapat dibandingkan.
+- Conclusion: simpulkan hanya apa yang benar-benar ditunjukkan comparison.
+- Recommendation: berikan rekomendasi hanya jika comparison cukup mendukungnya.
+- Jika comparison tidak cukup untuk menentukan pilihan, rekomendasikan pengujian langsung atau nyatakan bahwa sumber yang ditemukan belum cukup untuk memilih.
+
+CONTOH POLA:
+Jika:
+A = latency lebih rendah,
+B = CPU: sumber belum ditemukan,
+C = security: sumber belum cukup untuk dibandingkan,
+
+maka:
+BENAR:
+"A unggul pada latency berdasarkan benchmark tersebut. Sumber CPU dan security belum cukup untuk menentukan keunggulan keseluruhan."
+
+SALAH:
+"A adalah pilihan terbaik karena paling cepat, paling hemat CPU, dan paling aman."
+
+Jangan mengubah fakta menjadi klaim yang lebih luas daripada yang didukung oleh sumber yang ditemukan.
+"""
+
+        latency.start("synthesis")
+        llm_result = self.llm.analyze(system_prompt, goal)
+        profiler.add("synthesis", llm_result)
+        profiler.add_facts("synthesis", len(all_facts))
+        latency.stop("synthesis")
+
+        kg.save()
+
+        log_event(
+            "research_done",
+            {
+                "goal": goal,
+                "pipeline": pipeline_type,
+                "iterations": iterations_completed,
+                "facts": len(all_facts),
+                "duration_ms": (time.time() - t0_total) * 1000,
+            },
+        )
+
+        return {
+            "goal": goal, "answer": llm_result["content"],
+            "facts_count": len(all_facts), "iterations": iterations_completed,
+            "pipeline": pipeline_type, "graph_stats": kg.get_stats(),
+            "token_profile": profiler.summary(), "latency_profile": latency.summary(),
+            "api_cost": profiler.total_cost, "duration_ms": (time.time() - t0_total) * 1000,
+        }
