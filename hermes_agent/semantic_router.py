@@ -14,6 +14,13 @@ class SemanticRouter:
     def route(self, query: str, has_context: bool = False) -> RouteResult:
         q = query.strip()
 
+        if has_context and self._is_context_calculation(q):
+            return RouteResult(
+                mode="direct",
+                reason="context_calculation",
+                confidence=0.98,
+            )
+
         # Simple execution commands that do not request external knowledge
         # must stay on the direct LLM path.
         # Research is selected only when the query actually requires
@@ -105,6 +112,37 @@ class SemanticRouter:
             reason="research_required",
             confidence=0.90,
         )
+
+    def _is_context_calculation(self, q: str):
+        s = q.lower()
+
+        # Strong signals that the query refers to a value from prior context
+        # and applies a calculation to that value.
+        backref_terms = (
+            "tadi",
+            "sebelumnya",
+            "barusan",
+            "yang disebutkan",
+            "yg disebutkan",
+            "di atas",
+        )
+
+        calc_terms = (
+            "naik",
+            "turun",
+            "%",
+            "persen",
+            "kali",
+            "dibagi",
+            "ditambah",
+            "dikurangi",
+            "hasilnya",
+        )
+
+        has_backref = any(term in s for term in backref_terms)
+        has_calc = any(term in s for term in calc_terms)
+
+        return has_backref and has_calc
 
     def _is_math(self, q: str):
         s = q.lower().strip()
