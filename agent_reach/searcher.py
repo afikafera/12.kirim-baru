@@ -3,6 +3,8 @@ import json
 import urllib.parse
 from urllib.parse import urlparse
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,6 +53,18 @@ class AgentReachSearcher:
             if refine_queries is None
             else bool(refine_queries)
         )
+
+    def _run_async_sync(self, coro):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        def runner():
+            return asyncio.run(coro)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(runner).result()
 
     def _refine_query(self, query: str) -> str:
         if not self.llm or not self.refine_queries:
@@ -516,12 +530,66 @@ URL: {url}
 
         for src in sources:
             if src == "searxng":
-                r = self.search_searxng(
-                    query,
-                    allow_video=allow_video,
-                    allow_social=allow_social,
-                )
-                if r:
-                    results.append(f"[{src.upper()}]\n{r}")
+                exa_out = None
+                try:
+                    import asyncio
+                    from agent_reach.discovery_exa import ExaDiscoveryTool
+
+                    discovery = ExaDiscoveryTool()
+                    exa_raw = self._run_async_sync(
+                        discovery.search(query, num_results=5)
+                    )
+
+                    if exa_raw:
+                        self._active_query = query
+                        normalized = [
+                            {
+                                "title": item.title,
+                                "url": item.url,
+                                "content": item.highlights,
+                                "engine": "exa",
+                                "score": 0.0,
+                                "category": "general",
+                            }
+                            for item in exa_raw
+                        ]
+
+                        ranked = self._score_and_rank(
+                            normalized, 5, "general,it"
+                        )
+
+                        if self._has_sufficient_upstream_results(ranked):
+                            lines = []
+                            for score, item in ranked[:5]:
+                                title = item.get("title", "")
+                                url = item.get("url", "")
+                                snippet = item.get("content", "")[:150]
+                                engine = item.get("engine", "exa")
+                                lines.append(
+                                    f"- [{engine}] {title}\n"
+                                    f"  {snippet}\n"
+                                    f"  {url}\n"
+                                )
+
+                            if lines:
+                                exa_out = "".join(lines)
+
+                except Exception as exc:
+                    logger.warning(
+                        "[search] Exa primary lookup failed, falling back: %s",
+                        exc,
+                    )
+                    exa_out = None
+
+                if exa_out:
+                    results.append(f"[EXA]\n{exa_out}")
+                else:
+                    r = self.search_searxng(
+                        query,
+                        allow_video=allow_video,
+                        allow_social=allow_social,
+                    )
+                    if r:
+                        results.append(f"[{src.upper()}]\n{r}")
 
         return "\n\n".join(results) if results else "Tidak ada hasil pencarian."

@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Hermes Trace cf58e6b5df2b",
+    "quality_profile": "showcase",
+    "animation": "trace"
+  },
+  "participants": [
+    {
+      "id": "hermes",
+      "type": "backend",
+      "label": "Hermes"
+    },
+    {
+      "id": "planner",
+      "type": "backend",
+      "label": "Planner"
+    },
+    {
+      "id": "search",
+      "type": "external",
+      "label": "Search"
+    },
+    {
+      "id": "fetch",
+      "type": "external",
+      "label": "Fetch"
+    },
+    {
+      "id": "extract",
+      "type": "backend",
+      "label": "Extract"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m1",
+      "from": "hermes",
+      "to": "planner",
+      "y": 180,
+      "label": "research_start"
+    },
+    {
+      "id": "m2",
+      "from": "planner",
+      "to": "hermes",
+      "y": 250,
+      "label": "planner_done"
+    },
+    {
+      "id": "m3",
+      "from": "hermes",
+      "to": "planner",
+      "y": 320,
+      "label": "iteration 1"
+    },
+    {
+      "id": "m4",
+      "from": "hermes",
+      "to": "search",
+      "y": 390,
+      "label": "search: LiveCoinWatch Bitcoin price page structure"
+    },
+    {
+      "id": "m5",
+      "from": "hermes",
+      "to": "search",
+      "y": 460,
+      "label": "search: CoinMarketCap Bitcoin price page structure"
+    },
+    {
+      "id": "m6",
+      "from": "hermes",
+      "to": "search",
+      "y": 530,
+      "label": "search: Binance Bitcoin price page structure"
+    },
+    {
+      "id": "m7",
+      "from": "search",
+      "to": "hermes",
+      "y": 600,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m8",
+      "from": "search",
+      "to": "hermes",
+      "y": 670,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m9",
+      "from": "search",
+      "to": "hermes",
+      "y": 740,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m10",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 810,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m11",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 880,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m12",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 950,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m13",
+      "from": "hermes",
+      "to": "extract",
+      "y": 1020,
+      "label": "extract_start"
+    },
+    {
+      "id": "m14",
+      "from": "hermes",
+      "to": "planner",
+      "y": 1090,
+      "label": "iteration 2"
+    },
+    {
+      "id": "m15",
+      "from": "hermes",
+      "to": "search",
+      "y": 1160,
+      "label": "search: LiveCoinWatch Bitcoin price page structure"
+    },
+    {
+      "id": "m16",
+      "from": "hermes",
+      "to": "search",
+      "y": 1230,
+      "label": "search: CoinMarketCap Bitcoin price page structure"
+    },
+    {
+      "id": "m17",
+      "from": "hermes",
+      "to": "search",
+      "y": 1300,
+      "label": "search: Binance Bitcoin price page structure"
+    },
+    {
+      "id": "m18",
+      "from": "search",
+      "to": "hermes",
+      "y": 1370,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m19",
+      "from": "search",
+      "to": "hermes",
+      "y": 1440,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m20",
+      "from": "search",
+      "to": "hermes",
+      "y": 1510,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m21",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 1580,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m22",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 1650,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m23",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 1720,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m24",
+      "from": "hermes",
+      "to": "planner",
+      "y": 1790,
+      "label": "iteration 3"
+    },
+    {
+      "id": "m25",
+      "from": "hermes",
+      "to": "search",
+      "y": 1860,
+      "label": "search: Handling cookie consent banners in web scrapi"
+    },
+    {
+      "id": "m26",
+      "from": "hermes",
+      "to": "search",
+      "y": 1930,
+      "label": "search: Public cryptocurrency price APIs (CoinGecko, "
+    },
+    {
+      "id": "m27",
+      "from": "hermes",
+      "to": "search",
+      "y": 2000,
+      "label": "search: Web scraping best practices and rate limiting"
+    },
+    {
+      "id": "m28",
+      "from": "search",
+      "to": "hermes",
+      "y": 2070,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m29",
+      "from": "search",
+      "to": "hermes",
+      "y": 2140,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m30",
+      "from": "search",
+      "to": "hermes",
+      "y": 2210,
+      "label": "search_done (5 urls)"
+    },
+    {
+      "id": "m31",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 2280,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m32",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 2350,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m33",
+      "from": "fetch",
+      "to": "hermes",
+      "y": 2420,
+      "label": "fetch_done (2 docs)"
+    },
+    {
+      "id": "m34",
+      "from": "planner",
+      "to": "hermes",
+      "y": 2490,
+      "label": "iteration_done facts=0 coverage=0.0"
+    },
+    {
+      "id": "m35",
+      "from": "planner",
+      "to": "hermes",
+      "y": 2560,
+      "label": "research_done 3 iterations"
+    }
+  ]
+}

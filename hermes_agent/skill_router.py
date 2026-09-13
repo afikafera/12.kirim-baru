@@ -91,6 +91,8 @@ class SkillRouter:
             "github", "twitter", "x.com", "reddit",
             "youtube", "facebook", "instagram", "bilibili",
             "linkedin", "v2ex", "rss",
+            "weather", "cuaca", "forecast", "prakiraan", "suhu",
+            "temperature", "rain", "hujan",
         }
 
         platform_terms = {
@@ -205,6 +207,14 @@ class SkillRouter:
                 {
                     "saham", "stock", "stocks", "harga", "market",
                     "finance", "finansial",
+                },
+            ),
+            (
+                "weather",
+                "references/weather.md",
+                {
+                    "weather", "cuaca", "forecast", "prakiraan", "suhu",
+                    "temperature", "rain", "hujan", "open-meteo",
                 },
             ),
         ]

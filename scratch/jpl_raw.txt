@@ -1,0 +1,125 @@
+Title: Planetary Physical Parameters
+
+URL Source: https://ssd.jpl.nasa.gov/planets/phys_par.html
+
+Published Time: Thu, 27 Aug 2026 19:13:36 GMT
+
+Markdown Content:
+The following tables contain selected physical characteristics of the planets and dwarf planets, respectively. Table [column headings](https://ssd.jpl.nasa.gov/planets/phys_par.html#legend) are described below.
+
+| Planet | Equatorial Radius | Mean Radius | Mass | Bulk Density | Sidereal Rotation Period | Sidereal Orbital Period | V(1,0) | Geometric Albedo | Equatorial Gravity | Escape Velocity |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  | (km) | (km) | (×10 24 kg) | (g cm-3) | (d) | (y) | (mag) |  | (m s-2) | (km s-1) |
+| **Mercury** | 2440.53 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.04 | 2439.4 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.1 | 0.330103 [[F](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.000021 | 5.4289 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0007 | 58.6462 [[C](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.2408467 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -0.60 [[E](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.10 | 0.106 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 3.70 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 4.25 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Venus** | 6051.8 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±1.0 | 6051.8 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±1.0 | 4.86731 [[G](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.00023 | 5.243 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.003 | -243.018 [[C](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.61519726 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -4.47 [[E](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.07 | 0.65 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 8.87 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 10.36 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Earth** | 6378.1366 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0001 | 6371.0084 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0001 | 5.97217 [[H](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.00028 | 5.5134 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0003 | 0.99726968 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 1.0000174 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -3.86 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.367 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 9.80 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 11.19 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Mars** | 3396.19 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.1 | 3389.50 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.2 | 0.641691 [[I](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.000030 | 3.9340 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0007 | 1.02595676 [[C](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 1.8808476 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -1.52 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.150 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 3.71 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 5.03 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Jupiter** | 71492 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±4 | 69911 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±6 | 1898.125 [[J](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.088 | 1.3262 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0003 | 0.41354 [[C](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 11.862615 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -9.40 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.52 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 24.79 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 60.20 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Saturn** | 60268 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±4 | 58232 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±6 | 568.317 [[K](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.026 | 0.6871 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0002 | 0.44401 [[C](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 29.447498 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -8.88 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.47 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 10.44 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 36.09 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Uranus** | 25559 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±4 | 25362 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±7 | 86.8099 [[L](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0040 | 1.270 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.001 | -0.71833 [[C](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 84.016846 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -7.19 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.51 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 8.87 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 21.38 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Neptune** | 24764 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±15 | 24622 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±19 | 102.4092 [[M](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.0048 | 1.638 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.004 | 0.67125 [[C](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 164.79132 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -6.87 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.41 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 11.15 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 23.56 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+
+| Dwarf Planet | Equatorial Radius | Mean Radius | Mass | Bulk Density | Sidereal Rotation Period | Sidereal Orbital Period | V(1,0) | Geometric Albedo | Equatorial Gravity | Escape Velocity |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  | (km) | (km) | (×10 18 kg) | (g cm-3) | (d) | (y) | (mag) |  | (m s-2) | (km s-1) |
+| **Ceres** | 482.1 [[O](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 469.7 [[O](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 938.416 [[O](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.013 | 2.162 [[O](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.008 | 0.37809042 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 4.61 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 3.34 [[R](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.090 [[P](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.003 | 0.27 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.51 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Pluto** | 1188.3 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±1.6 | 1188.3 [[D](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±1.6 | 13024.6 [[N](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±6.0 | 1.853 [[N](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.004 | -6.3872 [[C](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 247.92065 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -1.0 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.3 [[B](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.62 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 1.21 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Eris** | 1200 [[S](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±50 | 1200 [[S](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±50 | 16600 [[S](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±200 | 2.3 [[S](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.3 | 1.079 [[Y](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 557.56 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -1.1 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.84 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.77 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 1.36 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Makemake** | 717 [[T](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±7 | 714 [[T](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±7 | 3100 [[U](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 2.1 [[U](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.937 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 307.54 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | -0.2 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.81 [[T](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±0.02 | 0.40 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.76 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+| **Haumea** | 870 [[W](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 715 [[W](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 4006 [[V](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] ±40 | 2.6 [[W](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.1631 [[X](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 284.81 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.2 [[Q](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.72 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.35 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] | 0.78 [[*](https://ssd.jpl.nasa.gov/planets/phys_par.html#refs)] |
+
+### Table Column Descriptions
+
+| Equatorial Radius | Radius of the planet at the equator. |
+| --- |
+| Mean Radius | Radius of a sphere with the equivalent volume of the planet. |
+| Mass | Total mass of the planet. |
+| Bulk Density | Density computed using the total volume and mass of the planet. |
+| Sidereal Rotation Period | Time required for a full rotation of the planet relate to fixed stars. |
+| Sidereal Orbital Period | Time required for the planet to make one complete orbit around the sun relative to fixed stars. |
+| V(1,0) | The visual magitude of the planet as seen at a distance of 1 au from both the Sun and observer. |
+| Geometric Albedo | See [glossary definition of albedo](https://ssd.jpl.nasa.gov/glossary/albedo.html). |
+| Equatorial Gravity | The gravitational acceleration on the planet's surface at the equator. |
+| Escape Velocity | The minimum velocity required for an object to escape the gravitational influence of the planet. |
+
+### References
+
+[*]_Value and uncertainty derived from other referenced values and uncertainties in this table_. Bulk Density computed based on the volume of a sphere with the published mean radius.
+
+[B]_Explanatory Supplement to the Astronomical Almanac_. 1992. K. P. Seidelmann, Ed., p.706 (Table 15.8) and p.316 (Table 5.8.1), University Science Books, Mill Valley, California.
+
+[C] Seidelmann, P.K. et al. 2007. "Report of the IAU/IAG Working Group on cartographic coordinates and rotational elements:2006" _Celestial Mech. Dyn. Astr._**98**:155-180.
+
+[D] Archinal, B.A. et al. 2018. "Report of the IAU/IAG Working Group on cartographic coordinates and rotational elements:2015" _Celestial Mech. Dyn. Astr._**130**:22.
+
+[E] Hilton, J.L. 2005. "Improving the Visual Magnitudes of the Planets in _The Astronomical Almanac._ I. Mercury and Venus" _Astron. J_**129**:2902-2906.
+
+[F] Anderson, J.D., et al. 1987. "The mass, gravity field, and ephemeris of Mercury" _Icarus_**71**:337-349.
+
+[G] Konopliv, A.S., et al. 1999. "Venus gravity: 180th degree and order model" _Icarus_**139**:3-18.
+
+[H] Folkner, W.M. and Williams, J.G. 2008. "Mass parameters and uncertainties in planetary ephemeris DE421." Interoffice Memo. 343R-08-004 (internal document), Jet Propulsion Laboratory, Pasadena, CA.
+
+[I] Jacobson, R.A. 2008. "Ephemerides of the Martian Satellites - MAR080" Interoffice Memo. 343R-08-006 (internal document), Jet Propulsion Laboratory, Pasadena, CA.
+
+[J] Jacobson, R.A. 2013. "Jovian Satellite ephemeris - JUP310" private communication.
+
+[K] Jacobson, R.A., et al. 2006. "The gravity field of the Saturnian system from satellite observations and spacecraft tracking data" _AJ_**132**(6):2520-2526.
+
+[L] Jacobson, R.A. 2014. "The Orbits of the Uranian Satellites and Rings, the Gravity Field of the Uranian System, and the Orientation of the Pole of Uranus" _AJ_**148**:76-88.
+
+[M] Jacobson, R.A. 2009. "The orbits of the Neptunian satellites and the orientation of the pole of Neptune" _AJ_**137**:4322.
+
+[N] Brozovic, M. et al. 2024. "Post-new-horizons Orbits and Masses for the Satellites of Pluto" _AJ_**167**:256
+
+[O] R.S. Park, et al. (2016) "A partially differentiated interior for (1) Ceres deduced from its gravity field and shape" _Nature_**537**:515-517
+
+[P] Li et al. (2006) _Icarus_**182**:143-160
+
+[Q] JPL Small-Body Database. 2019.
+
+[R] IRAS-A-FPA-3-RDR-IMPS-V6.0
+
+[S] Brown, Michael E.; Schaller, Emily L. (2007) _Science_**316**:1585.
+
+[T] Brown, Michael E. (2013) _ApJ_**767**:L7.
+
+[U] Parker, Alex et al. (2018) DPS meeting# 50 id. 509.02.
+
+[V] Ragozzine, D.; Brown, M. E. (2009) _AJ_**137**:4766-4776.
+
+[W] Lockwood, Alexandra C.; Brown, Michael E.; Stansberry, John. (2014) _Earth, Moon, Planets_**111**:127-137.
+
+[X] Ortiz, J.L.; Santos-Sanz, P.; Sicardy, B.; Benedetti-Rossi, G.; et al. (2017) _Nature_**550**:219-223.
+
+[Y] Roe, H. G.; Pike, R.E.; Brown, M.E. (2008) _Icarus_**198**:459-464.
+
+### Change Log
+
+##### 2019-Dec-12
+
+A second table for dwarf planets was added. Mass values were updated from current estimates of GM (referenced above). The value of G (Newtonian gravitational constant) was taken from the current best estimate (CODATA 2018) available from the [NIST website](http://physics.nist.gov/cgi-bin/cuu/Value?bg "Opens in new window"), G=6.67430 (±0.00015) × 10-11 kg-1 m 3 s-2.
+
+##### 2018-Mar-28
+
+Mass values were updated from current estimates of GM (referenced above). The value of G (Newtonian gravitational constant) was taken from the current best estimate (CODATA 2014) available from the [NIST website](http://physics.nist.gov/cgi-bin/cuu/Value?bg "Opens in new window"), G=6.67408 (±0.00031) × 10-11 kg-1 m 3 s-2. Bulk density values (and uncertainties) were computed based on updated mass values and computed volumes (based on a sphere of the published mean radius). Equatorial surface gravity values were computed from updated mass and equatorial radius values. Escape velocities were also updated based on computed values using updated masses and mean radii.
+
+##### 2008-Nov-05
+
+Mass values were updated from current estimates of GM (referenced above). The value of G (Newtonian gravitational constant) was taken from the current best estimate (CODATA 2006) available from the [NIST website](http://physics.nist.gov/cuu/Constants/index.html "Opens in new window"), G=6.67428 (±0.00067) × 10-11 kg-1 m 3 s-2. Mean radius values were added. Bulk density values (and uncertainties) were computed based on updated mass values and computed volumes (based on a sphere of the published mean radius). Equatorial surface gravity values were computed from updated mass and equatorial radius values. Escape velocities were also updated based on computed values using updated masses and mean radii.
+
+##### 2008-Oct-24
+
+Sidereal rotation periods were updated using improved values from the "Report of the IAU/IAG Working Group on cartographic coordinates and rotational elements: 2006" published in 2007. Rotation rates were significantly improved for Saturn, Uranus, and Neptune. Visual magnitude parameter V(1,0) values were improved for Mercury and Venus using reference [E] listed above.
+
+##### 2006-Mar-14
+
+A previous reference ("Astrometric and Geodetic Properties of Earth and the Solar System" in Global Earth Physics, A Handbook of Physical Constants, AGU Reference Shelf 1, 1995, American Geophysical Union, Tables 6,7,10.) had a few erroneous values. Those values have been replaced using data from the current reference list.
+
+##### 2002-Nov-22
+
+Pluto's mass and density were updated using a more current reference. It should be noted that Pluto's radius ranges from about 1150 to 1206 km in the literature.
+
+##### 2001-May-22
+
+Sidereal orbit period data were corrected. Previous values were taken from p.704 in reference [B] where they were incorrectly labeled as Sidereal instead of Tropical. The corrected values are derived from the mean longitude rates shown in Table 5.8.1 in reference [B].

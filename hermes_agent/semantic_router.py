@@ -11,8 +11,35 @@ class RouteResult:
 
 class SemanticRouter:
 
+    MEMORY_TRIGGERS = (
+        "ingat ", "catat ", "simpan ", "camkan ",
+        "remember ", "note that ", "keep in mind ",
+    )
+
+    # Common polite-request prefixes that can precede the imperative verb.
+    # Only ONE leading prefix is stripped, so this still requires the
+    # trigger verb to appear effectively at the start of the sentence,
+    # preserving the original safety property against negative cases
+    # like "Ingatkan saya nanti...".
+    POLITE_PREFIXES = ("tolong ", "mohon ", "coba ", "please ")
+
+    def _is_memory_intent(self, q: str) -> bool:
+        s = q.lower().strip()
+        for prefix in self.POLITE_PREFIXES:
+            if s.startswith(prefix):
+                s = s[len(prefix):]
+                break
+        return any(s.startswith(t) for t in self.MEMORY_TRIGGERS)
+
     def route(self, query: str, has_context: bool = False) -> RouteResult:
         q = query.strip()
+
+        if self._is_memory_intent(q):
+            return RouteResult(
+                mode="memory",
+                reason="memory_write_intent",
+                confidence=0.95,
+            )
 
         if has_context and self._is_context_calculation(q):
             return RouteResult(
@@ -63,6 +90,13 @@ class SemanticRouter:
                 mode="research",
                 reason="research_required",
                 confidence=0.90,
+            )
+
+        if self._looks_like_empirical_research(q.lower()):
+            return RouteResult(
+                mode="research",
+                reason="empirical_research",
+                confidence=0.92,
             )
 
         if self._looks_like_external_media(q):
@@ -217,6 +251,7 @@ class SemanticRouter:
             len(q.split()) >= 8
             and any(pattern in s for pattern in logic_patterns)
             and not self._looks_like_external_lookup(s)
+            and not self._looks_like_empirical_research(s)
         )
 
     def _is_self_contained_reasoning(self, q: str):
@@ -238,6 +273,7 @@ class SemanticRouter:
             len(q.split()) >= 6
             and any(term in s for term in reasoning_terms)
             and not self._looks_like_external_lookup(s)
+            and not self._looks_like_empirical_research(s)
         )
 
     def _looks_like_external_lookup(self, q: str):
@@ -261,6 +297,43 @@ class SemanticRouter:
         )
 
         return any(term in q for term in external_terms)
+
+    def _looks_like_empirical_research(self, q: str) -> bool:
+        research_terms = (
+            "sumber",
+            "sources",
+            "source",
+            "data",
+            "statistik",
+            "statistics",
+            "statistical",
+            "bukti",
+            "evidence",
+            "verifikasi",
+            "verify",
+            "diverifikasi",
+            "verifiable",
+            "referensi",
+            "reference",
+            "references",
+            "metodologi",
+            "methodology",
+            "sitasi",
+            "citation",
+            "citations",
+            "bandingkan",
+            "perbandingan",
+            "komparasi",
+            "compare",
+            "comparison",
+            "riset",
+            "penelitian",
+            "research",
+            "studi",
+            "study",
+            "benchmark",
+        )
+        return any(term in q for term in research_terms)
 
     def _is_short_llm(self, q: str):
         if len(q.split()) > 5:

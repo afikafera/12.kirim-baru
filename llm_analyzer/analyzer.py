@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
+import inspect
 
 from langfuse.openai import OpenAI
 
@@ -164,6 +165,7 @@ class LLMAnalyzer:
         user_query: str,
         temperature: float = 0.3,
         model=None,
+        max_tokens=None,
     ) -> dict:
 
         selected_name, provider = self._get_provider(model)
@@ -179,15 +181,22 @@ class LLMAnalyzer:
             f"user={len(user_query)}"
         )
 
+        caller = inspect.stack()[1]
+        print(
+            f"[LLM CALLER] file={caller.filename} "
+            f"line={caller.lineno} function={caller.function}",
+            flush=True,
+        )
+
         client = OpenAI(
             api_key=provider["api_key"],
             base_url=provider["base_url"],
             timeout=120.0,
         )
 
-        response = client.chat.completions.create(
-            model=provider["model"],
-            messages=[
+        request_kwargs = {
+            "model": provider["model"],
+            "messages": [
                 {
                     "role": "system",
                     "content": system_prompt,
@@ -197,8 +206,15 @@ class LLMAnalyzer:
                     "content": user_query,
                 },
             ],
-            temperature=temperature,
-        )
+            "temperature": temperature,
+        }
+
+        # Optional per-call output budget.
+        # None preserves the previous behavior: do not send max_tokens.
+        if max_tokens is not None:
+            request_kwargs["max_tokens"] = int(max_tokens)
+
+        response = client.chat.completions.create(**request_kwargs)
 
         # DIAGNOSTIC ONLY: inspect provider response shape before parsing.
         try:
@@ -256,16 +272,20 @@ class LLMAnalyzer:
                 flush=True,
             )
 
+        usage = getattr(response, "usage", None)
+        t_in = getattr(usage, "prompt_tokens", 0) if usage else 0
+        t_out = getattr(usage, "completion_tokens", 0) if usage else 0
+
+        first_choice = response.choices[0]
+
         return {
-            "content": response.choices[0].message.content,
+            "content": first_choice.message.content,
             "model": response.model,
             "requested_model": selected_name,
-            "tokens_input": response.usage.prompt_tokens,
-            "tokens_output": response.usage.completion_tokens,
-            "api_cost": self._calc_cost(
-                response.usage.prompt_tokens,
-                response.usage.completion_tokens,
-            ),
+            "finish_reason": getattr(first_choice, "finish_reason", None),
+            "tokens_input": t_in,
+            "tokens_output": t_out,
+            "api_cost": self._calc_cost(t_in, t_out),
         }
 
     def _calc_cost(self, tokens_in: int, tokens_out: int) -> float:

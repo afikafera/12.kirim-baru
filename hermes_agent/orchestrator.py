@@ -7,8 +7,8 @@ import logging
 from urllib.parse import urlparse
 from hermes_agent.jsonl_logger import log_event, init_request_id
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from agent_reach.searcher import AgentReachSearcher
-from agent_reach.evidence import DocumentIntelligence
+from aran_search.searcher import AgentReachSearcher
+from aran_search.evidence import DocumentIntelligence
 from hermes_agent.task_planner import TaskPlanner
 from hermes_agent.completeness_checker import CompletenessChecker
 from hermes_agent.knowledge_graph import KnowledgeGraph
@@ -18,6 +18,7 @@ from hermes_agent.skill_bridge import SkillBridge
 from hermes_agent.skill_executors import (
     agent_reach_executor,
     agent_reach_fetch_executor,
+    weather_executor,
 )
 from hermes_agent.search_strategy import SearchStrategy
 from hermes_agent.fact_checker import FactChecker
@@ -45,6 +46,7 @@ class HermesAgent:
     MAX_WORKERS = 4
     CACHE_MAX = 500
     RESEARCH_THRESHOLD = 5
+    MAX_RECOVERY_ATTEMPTS = 1
 
     def __init__(self, memory_manager, calibrator, llm_analyzer, outcome_logger, lessons_engine):
         self.mm = memory_manager
@@ -78,13 +80,65 @@ class HermesAgent:
                 **kwargs,
             ),
         )
+        self.skill_bridge.register(
+            "weather",
+            lambda query, **kwargs: weather_executor(
+                self.searcher,
+                query,
+                **kwargs,
+            ),
+        )
         self.docintel = DocumentIntelligence()
         self.facts = FactChecker(llm_analyzer)
         self.ranker = FactRanker()
         self._strategy_cache = {}
+        self._validation_cache = {}
 
     def _make_requirement_id(self, topic: str, need: str) -> str:
         return f"{topic} [{need}]"
+
+    def _extract_memory_intent(self, goal: str):
+        prompt = f"""The user gave this instruction to remember something:
+
+"{goal}"
+
+Extract what should be remembered as JSON:
+{{"topic": "short topic name", "field": "short field name", "value": "the value to remember"}}
+
+RULES:
+- topic and field must be short snake_case-like labels (max 3 words each).
+- value must be the exact value the user wants remembered (e.g. a code, name, number).
+- Do not invent information not present in the instruction.
+- Return ONLY the JSON object, nothing else.
+"""
+        try:
+            result = self.llm.analyze(
+                system_prompt=(
+                    "You are a strict memory-extraction assistant. "
+                    "Extract only what is explicitly stated. Return JSON only."
+                ),
+                user_query=prompt,
+                temperature=0.0,
+            )
+            raw = result["content"].strip()
+            import json
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                parsed = json.loads(raw[start:end + 1]) if start >= 0 and end > start else None
+
+            if (
+                isinstance(parsed, dict)
+                and all(k in parsed for k in ("topic", "field", "value"))
+                and all(isinstance(parsed[k], str) and parsed[k].strip() for k in ("topic", "field", "value"))
+            ):
+                return parsed
+            return None
+        except Exception as exc:
+            logger.warning("[extract_memory_intent] fail: %s", exc)
+            return None
 
     def _total_facts(self, kg: KnowledgeGraph, scope: set = None) -> int:
         nodes = kg.graph["nodes"]
@@ -111,14 +165,14 @@ class HermesAgent:
             if raw and raw.startswith("Error fetch"):
                 logger.info("[AUDIT FETCH ERROR] url=%s raw=%r", url, raw[:300])
             if raw and len(raw) > 50:
-                processed = self.docintel.process(raw, query)
+                processed = self.docintel.process(raw, query, url=url)
 
                 content = processed["formatted"]
 
                 # Web image OCR bridge: optional enrichment only.
                 if "![" in content:
                     try:
-                        from agent_reach.agent_browser_asset_resolver import (
+                        from aran_search.agent_browser_asset_resolver import (
                             AgentBrowserAssetResolver,
                         )
 
@@ -184,7 +238,7 @@ class HermesAgent:
             fetched[url]
             for url in urls
             if url in fetched
-        ][:2]
+        ]
 
     def _get_strategy(self, topic: str, need: str) -> dict:
         cache_key = f"{topic}|{need}"
@@ -196,6 +250,301 @@ class HermesAgent:
                 f"{topic} {need}", "general", "general", topic
             )
         return self._strategy_cache[cache_key]
+
+    @staticmethod
+    def _filter_evidence_by_source_policy(evidence: list, constraints: list) -> list:
+        """Apply deterministic source restrictions before evidence validation."""
+        if not evidence or not constraints:
+            return evidence
+
+        constraint_text = " ".join(
+            str(c).strip().lower()
+            for c in constraints
+            if str(c).strip()
+        )
+
+        if "official" not in constraint_text or "ietf" not in constraint_text:
+            return evidence
+
+        official_domains = {
+            "rfc-editor.org",
+            "datatracker.ietf.org",
+            "ietf.org",
+        }
+
+        filtered = []
+        for ev in evidence:
+            url = str(ev.get("url", "")).strip()
+            host = urlparse(url).netloc.lower().split(":")[0]
+
+            if (
+                host in official_domains
+                or any(host.endswith("." + domain) for domain in official_domains)
+            ):
+                filtered.append(ev)
+            else:
+                logger.info(
+                    "[AUDIT SOURCE POLICY] decision=REJECT "
+                    "reason=official_ietf_only url=%s host=%s",
+                    url,
+                    host,
+                )
+
+        logger.info(
+            "[AUDIT SOURCE POLICY] policy=official_ietf_only "
+            "input=%d accepted=%d rejected=%d",
+            len(evidence),
+            len(filtered),
+            len(evidence) - len(filtered),
+        )
+        return filtered
+
+    def _evaluate_requirement_fulfillment(
+        self,
+        topic: str,
+        need: str,
+        success_criteria: list,
+        facts: dict,
+        cache: dict,
+    ):
+        """
+        Determine whether extracted request-local facts fulfill the
+        planner's success criteria for a requirement.
+
+        This is a semantic completion gate. It must use only supplied
+        facts and must never invent missing values.
+        """
+        if not facts:
+            return False, "no_request_facts", []
+
+        import json
+
+        cache_key = (
+            topic,
+            need,
+            tuple(success_criteria or []),
+            json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str),
+        )
+
+        if cache_key in cache:
+            fulfilled, reason, missing = cache[cache_key]
+            logger.info(
+                "[AUDIT SEMANTIC CACHE] topic=%s decision=%s missing=%s",
+                topic,
+                "FULFILLED" if fulfilled else "MISSING",
+                missing,
+            )
+            return fulfilled, reason, missing
+
+        prompt = f"""You are a strict research requirement fulfillment evaluator.
+
+REQUIREMENT TOPIC:
+{topic}
+
+REQUIREMENT NEED:
+{need}
+
+SUCCESS CRITERIA:
+{json.dumps(success_criteria or [], ensure_ascii=False)}
+
+EXTRACTED FACTS:
+{json.dumps(facts, ensure_ascii=False, default=str)}
+
+TASK:
+Determine whether the supplied extracted facts fulfill ALL factual
+requirements represented by the success criteria.
+
+IMPORTANT:
+- Judge ONLY from the supplied facts.
+- Do not use general knowledge.
+- Do not infer values that are not explicitly present in the facts.
+- The existence of facts does NOT itself mean the requirement is fulfilled.
+- Every factual component required by the success criteria must be supported.
+- If any required factual component is missing, return fulfilled=false.
+- Never invent or complete missing values.
+- A documentation endpoint or parameter description does not count as
+  the actual requested value unless that value is explicitly present.
+- Return fulfilled=true only when the supplied facts support the required
+  factual result.
+
+Return ONLY valid JSON:
+{{"fulfilled": true_or_false, "missing": ["specific missing criteria 1", "specific missing criteria 2"], "reason": "short reason"}}
+"""
+
+        try:
+            result = self.llm.analyze(
+                system_prompt=(
+                    "You are a strict research requirement fulfillment "
+                    "evaluator. Use only the supplied facts. "
+                    "Never infer or invent missing values."
+                ),
+                user_query=prompt,
+                temperature=0.0,
+            )
+
+            raw = result.get("content", "").strip()
+            parsed = None
+
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start >= 0 and end > start:
+                    try:
+                        parsed = json.loads(raw[start:end + 1])
+                    except Exception:
+                        parsed = None
+
+            fulfilled = (
+                isinstance(parsed, dict)
+                and parsed.get("fulfilled") is True
+            )
+            reason = (
+                parsed.get("reason", "no reason")
+                if isinstance(parsed, dict)
+                else "invalid evaluator response"
+            )
+            missing = []
+            if isinstance(parsed, dict) and isinstance(parsed.get("missing"), list):
+                missing = [str(m).strip() for m in parsed["missing"] if str(m).strip()]
+
+        except Exception as exc:
+            fulfilled = False
+            reason = f"evaluator_error:{type(exc).__name__}"
+            missing = []
+
+        cache[cache_key] = (fulfilled, reason, missing)
+
+        logger.info(
+            "[AUDIT SEMANTIC REQUIREMENT] topic=%s decision=%s missing=%s reason=%s",
+            topic,
+            "FULFILLED" if fulfilled else "MISSING",
+            missing,
+            reason,
+        )
+
+        return fulfilled, reason, missing
+
+    def _extract_weather_target(self, text: str) -> tuple[str | None, str | None]:
+        """
+        Extract target location and target date from market question or topic.
+        """
+        if not text:
+            return None, None
+
+        KNOWN_CITIES = [
+            "Shanghai", "Dallas", "New Orleans", "Wellington", "Munich",
+            "Hong Kong", "San Francisco", "Beijing", "Tokyo", "London",
+            "Paris", "New York", "Singapore", "Jakarta", "Sydney", "Berlin",
+        ]
+        loc = None
+        for city in KNOWN_CITIES:
+            if re.search(r"\b" + re.escape(city) + r"\b", text, re.IGNORECASE):
+                loc = city
+                break
+
+        if not loc:
+            m_city = re.search(r"(?:in|for|at)\s+([A-Z][a-zA-Z\s]+?)(?:\s+on|\s*\?|$)", text)
+            if m_city:
+                candidate = m_city.group(1).strip()
+                if candidate.lower() not in {"the", "a", "an"}:
+                    loc = candidate
+
+        target_date = None
+        m_iso = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+        if m_iso:
+            target_date = m_iso.group(1)
+        else:
+            m_date = re.search(
+                r"\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(20\d{2}))?\b",
+                text,
+                re.IGNORECASE,
+            )
+            if m_date:
+                month_name = m_date.group(1).lower()
+                day = int(m_date.group(2))
+                year = int(m_date.group(3)) if m_date.group(3) else 2026
+                month_map = {
+                    "jan": 1, "january": 1, "feb": 2, "february": 2,
+                    "mar": 3, "march": 3, "apr": 4, "april": 4,
+                    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+                    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+                    "oct": 10, "october": 10, "nov": 11, "november": 11,
+                    "dec": 12, "december": 12,
+                }
+                m_num = month_map.get(month_name, 9)
+                target_date = f"{year:04d}-{m_num:02d}-{day:02d}"
+
+        return loc, target_date
+
+    def _resolve_recovery_requirement(
+        self,
+        unmet_reason: str,
+        current_facts: dict,
+        plan: dict,
+        missing_items: list | None = None,
+        goal: str = "",
+    ) -> dict | None:
+        """
+        Generic Continuation Planner:
+        Transforms structured missing criteria into 1 generic targeted requirement.
+        Strictly requires missing_items from semantic evaluator; no loose fallback.
+        """
+        if not missing_items:
+            return None
+
+        clean_missing = [str(m).strip() for m in missing_items if str(m).strip()]
+        if not clean_missing:
+            return None
+
+        primary_missing = "; ".join(clean_missing[:3])
+        base_subject = plan.get("goal") or goal or "Research target"
+
+        return {
+            "topic": f"{base_subject} - {primary_missing}",
+            "need": f"Collect specific verifiable data: {primary_missing}",
+            "priority": "high",
+            "depends_on": [],
+            "is_recovery": True,
+        }
+
+    def _inject_recovery_requirement(
+        self,
+        new_k: dict,
+        plan: dict,
+        requirement_map: dict,
+        kg,
+        request_scope: set,
+        goal: str,
+    ) -> str | None:
+        """
+        Phase 1 Atomic 4-Way State Injection.
+        """
+        req_id = self._make_requirement_id(new_k["topic"], new_k["need"])
+        if req_id in requirement_map:
+            return None
+
+        # 1. plan['knowledge_required'] (wajib untuk dependency resolution)
+        plan.setdefault("knowledge_required", []).append(new_k)
+
+        # 2. requirement_map (antrian baca request_ready_nodes)
+        requirement_map[req_id] = new_k
+
+        # 3. KnowledgeGraph nodes & edges
+        kg.add_node(req_id, status="planned", confidence=0.7)
+        kg.add_relation(goal, "requires", req_id)
+        for dep in new_k.get("depends_on", []):
+            for existing in plan.get("knowledge_required", []):
+                if existing["topic"] == dep:
+                    dep_id = self._make_requirement_id(existing["topic"], existing["need"])
+                    kg.add_relation(req_id, "depends_on", dep_id)
+                    break
+
+        # 4. request_scope (set untuk metrik coverage & facts limit)
+        request_scope.add(req_id)
+
+        return req_id
 
     def _validate_evidence_relevance(
         self,
@@ -226,6 +575,37 @@ class HermesAgent:
         for ev in evidence:
             url = ev.get("url", "")
             content = ev.get("content", "")
+
+            cache_key = (topic, need, url, content)
+
+            if cache_key not in self._validation_cache:
+                same_url_keys = [
+                    k for k in self._validation_cache
+                    if len(k) == 4 and k[2] == url
+                ]
+                if same_url_keys:
+                    logger.info(
+                        "[AUDIT EVIDENCE CACHE MISS] topic=%s url=%s "
+                        "same_url_keys=%d",
+                        topic,
+                        url,
+                        len(same_url_keys),
+                    )
+
+            if cache_key in self._validation_cache:
+                relevant, reason = self._validation_cache[cache_key]
+
+                logger.info(
+                    "[AUDIT EVIDENCE CACHE] topic=%s url=%s decision=%s",
+                    topic,
+                    url,
+                    "ACCEPT" if relevant else "REJECT",
+                )
+
+                if relevant:
+                    validated.append(ev)
+
+                continue
 
             source_type = str(
                 ev.get("source_type")
@@ -328,6 +708,8 @@ Return ONLY valid JSON:
                 relevant = False
                 reason = f"validator_error:{type(exc).__name__}"
 
+            self._validation_cache[cache_key] = (relevant, reason)
+
             logger.info(
                 "[AUDIT EVIDENCE GATE] topic=%s url=%s decision=%s reason=%s",
                 topic,
@@ -365,6 +747,47 @@ Return ONLY valid JSON:
             "allow_video": any(term in text for term in video_terms),
             "allow_social": any(term in text for term in social_terms),
         }
+
+    @staticmethod
+    def _extract_embedded_sudoku_grid(goal: str) -> str | None:
+        """Return only a strict 9x9 Sudoku grid from an explicit fenced block."""
+        if not isinstance(goal, str) or "sudoku" not in goal.lower():
+            return None
+
+        allowed_cells = set("1234567890.")
+        in_fence = False
+        rows = []
+
+        for line in goal.splitlines():
+            stripped = line.strip()
+
+            if stripped.startswith("```"):
+                if in_fence:
+                    if len(rows) == 9:
+                        return "\n".join(rows)
+                    rows = []
+                    in_fence = False
+                else:
+                    in_fence = True
+                    rows = []
+                continue
+
+            if not in_fence:
+                continue
+
+            compact = "".join(ch for ch in line.strip() if ch not in " \t|")
+            if len(compact) == 9 and all(ch in allowed_cells for ch in compact):
+                rows.append(compact)
+                if len(rows) > 9:
+                    rows = []
+                continue
+
+            if stripped and set(stripped) <= set("-|+ \t"):
+                continue
+
+            rows = []
+
+        return None
 
     def research(self, goal: str, context: str = "", attachments: list | None = None) -> dict:
         profiler = TokenProfiler()
@@ -413,7 +836,15 @@ Return ONLY valid JSON:
         # Persistent KG tetap menyimpan historical facts, tetapi synthesis
         # hanya boleh memakai facts yang dihasilkan pada research run ini.
         request_facts = {}
+        # PATCH 9A: input/ facts are request-local and cannot satisfy the
+        # req_id/ predicate in request_requirement_complete().
+        request_input_facts = {}
         request_facts_lock = threading.Lock()
+        semantic_completion_cache = {}
+
+        def request_requirement_complete(req_id):
+            prefix = f"{req_id}/"
+            return any(key.startswith(prefix) for key in request_facts)
 
         t0_total = time.time()
 
@@ -434,6 +865,13 @@ Return ONLY valid JSON:
 
         # 1. Plan
         
+        logger.info(
+            "[TRACE ROUTE INPUT] goal=%r has_context=%s context_chars=%d",
+            goal,
+            bool(context.strip()),
+            len(context),
+        )
+
         route = self.router.route(goal, has_context=bool(context.strip()))
 
         logger.info(
@@ -442,6 +880,35 @@ Return ONLY valid JSON:
             route.reason,
             route.confidence,
         )
+
+        if route.mode == "memory":
+            logger.info("[router] memory write intent")
+
+            extracted = self._extract_memory_intent(goal)
+
+            if extracted:
+                self.user_memory.add(
+                    topic=extracted["topic"],
+                    field=extracted["field"],
+                    value=extracted["value"],
+                    source="user",
+                )
+                logger.info(
+                    "[AUDIT MEMORY WRITE] topic=%s field=%s value=%s",
+                    extracted["topic"],
+                    extracted["field"],
+                    extracted["value"],
+                )
+                return (
+                    f"Dicatat: {extracted['topic']} / "
+                    f"{extracted['field']} = {extracted['value']}"
+                )
+
+            logger.warning("[AUDIT MEMORY WRITE] extraction_failed goal=%r", goal)
+            return (
+                "Maaf, saya tidak bisa mengekstrak apa yang perlu diingat "
+                "dari permintaan itu. Bisa dijelaskan ulang?"
+            )
 
         if route.mode == "direct":
             logger.info("[router] bypass planner/search")
@@ -463,6 +930,14 @@ Return ONLY valid JSON:
 
             direct_query = goal
 
+            if context:
+                direct_query = (
+                    "CONVERSATION CONTEXT:\n"
+                    f"{context.strip()}\n\n"
+                    "USER QUESTION:\n"
+                    f"{goal}"
+                )
+
             if attachment_context:
                 direct_query += (
                     "\n\n"
@@ -482,6 +957,7 @@ Return ONLY valid JSON:
                     "You are a precise technical assistant. "
                     "Answer directly and concisely. "
                     "Use only facts provided by the user. "
+                    "Treat CONVERSATION CONTEXT as prior discussion and verified information from previous turns. "
                     "Treat USER ATTACHMENT EVIDENCE as user-provided evidence. "
                     "Do not invent missing facts, labels, constraints, or assumptions. "
                     "For logic and reasoning problems, distinguish facts from assumptions. "
@@ -496,6 +972,31 @@ Return ONLY valid JSON:
 
             return result["content"]
 
+
+        # PATCH 9A: retain only a canonical grid, never the whole goal.
+        # It is intentionally excluded from the attachment early gate, whose
+        # successful path can skip web research.
+        embedded_user_evidence = []
+        embedded_sudoku_grid = self._extract_embedded_sudoku_grid(goal)
+        if embedded_sudoku_grid:
+            embedded_user_evidence.append({
+                "content": embedded_sudoku_grid,
+                "source_type": "user_input",
+                "evidence_type": "user_input",
+                "doc_type": "user_input",
+                "url": "user://request",
+                "transient": True,
+            })
+            request_input_facts["input/user_sudoku_grid"] = {
+                "value": embedded_sudoku_grid,
+                "source": "user://request",
+                "source_type": "user_input",
+            }
+            logger.info(
+                "[AUDIT EMBEDDED INPUT] req_id=%s type=sudoku_grid chars=%d",
+                req_id,
+                len(embedded_sudoku_grid),
+            )
 
         # KnowledgeGraph is research-only. Direct requests must not acquire
         # the global KG lock.
@@ -597,6 +1098,9 @@ Return ONLY valid JSON:
             )
         iterations_completed = 0
         retry_count = {}
+        recovery_attempts = 0
+        max_recovery_attempts = getattr(self, "MAX_RECOVERY_ATTEMPTS", 1)
+        attempted_recovery_sigs = set()
 
         # 2.5 Direct URL preload
         #
@@ -670,6 +1174,19 @@ Return ONLY valid JSON:
                         status,
                         deps,
                     )
+
+                # Current-request completion has priority over persistent KG
+                # status. A requirement already satisfied in this research run
+                # must not be searched/extracted again.
+                if request_requirement_complete(req_id):
+                    logger.info(
+                        "[AUDIT REQ NODE] req_id=%s status=%s deps=%s "
+                        "decision=SKIP_CURRENT_REQUEST_COMPLETE",
+                        req_id,
+                        status,
+                        deps,
+                    )
+                    continue
 
                 retries = retry_count.get(req_id, 0)
                 if retries >= self.MAX_RETRIES:
@@ -746,8 +1263,52 @@ Return ONLY valid JSON:
             ready = request_ready_nodes()
 
             if not ready:
-                logger.info(f"[orchestrator] all requirements complete or blocked")
-                break
+                # CONTROLLER TERMINATION & RECOVERY GATE
+                current_facts = {**request_facts, **request_input_facts}
+                semantic_topic = plan.get("goal", goal)
+                semantic_need = "research goal fulfillment"
+                fulfilled, reason, missing = self._evaluate_requirement_fulfillment(
+                    semantic_topic,
+                    semantic_need,
+                    plan.get("success_criteria", []),
+                    current_facts,
+                    semantic_completion_cache,
+                )
+
+                if fulfilled:
+                    logger.info("[CONTROLLER GATE] all success criteria met -> complete")
+                    break
+
+                if recovery_attempts >= max_recovery_attempts:
+                    logger.info(
+                        "[CONTROLLER GATE] max recovery reached (%d/%d) -> graceful incomplete",
+                        recovery_attempts,
+                        max_recovery_attempts,
+                    )
+                    break
+
+                recovery_k = self._resolve_recovery_requirement(
+                    reason, current_facts, plan, missing_items=missing, goal=goal
+                )
+                if not recovery_k:
+                    logger.info("[CONTROLLER GATE] no actionable recovery -> graceful incomplete")
+                    break
+
+                req_sig = (recovery_k.get("topic"), recovery_k.get("need"))
+                if req_sig in attempted_recovery_sigs:
+                    logger.info("[CONTROLLER GATE] duplicate recovery rejected -> graceful incomplete")
+                    break
+
+                attempted_recovery_sigs.add(req_sig)
+                injected_id = self._inject_recovery_requirement(
+                    recovery_k, plan, requirement_map, kg, request_scope, goal
+                )
+                if not injected_id:
+                    break
+
+                recovery_attempts += 1
+                logger.info("[CONTROLLER RECOVERY] cycle=%d injected=%s", recovery_attempts, injected_id)
+                continue
 
             batch = ready[:self.PARALLEL_NODES]
 
@@ -822,7 +1383,12 @@ Return ONLY valid JSON:
                         latency.start("extract")
                         t0 = time.time()
 
-                        checklist = [{"field_id": "facts", "label": "All facts"}]
+                        checklist = [
+                        {
+                            "field_id": req_id,
+                            "label": f"{topic}: {need}",
+                        }
+                    ]
 
                         new_facts, usage = self.facts.extract_facts_batch(
                             attachment_for_req,
@@ -939,6 +1505,15 @@ Return ONLY valid JSON:
                         )
                         return []
 
+                    if retries >= 1:
+                        logger.info(
+                            "[AUDIT AGENT-REACH FALLBACK] req_id=%s "
+                            "retry=%d query=%s",
+                            req_id,
+                            retries,
+                            q,
+                        )
+
                     results = self.skill_bridge.execute_selected(
                         selected_skill,
                         q,
@@ -947,7 +1522,7 @@ Return ONLY valid JSON:
                         allow_social=source_policy["allow_social"],
                     )
 
-                    if not results or not isinstance(results, dict):
+                    if not results:
                         logger.warning(
                             "[AUDIT SKILL EXEC] req_id=%s query=%s "
                             "invalid_result=%r",
@@ -957,17 +1532,61 @@ Return ONLY valid JSON:
                         )
                         return []
 
-                    result_text = results.get("result", "")
+                    # SkillBridge returns an envelope:
+                    # {"skill": ..., "result": <executor result>}
+                    # Unwrap it before interpreting the search payload.
+                    if isinstance(results, dict) and "result" in results:
+                        results = results.get("result")
 
-                    if not isinstance(result_text, str):
-                        result_text = str(result_text or "")
+                    if isinstance(results, list):
+                        return [
+                            item.get("url")
+                            for item in results
+                            if isinstance(item, dict) and item.get("url")
+                        ]
 
-                    import re
-                    return re.findall(r'(https?://[^\s\n]+)', result_text)
-                # Direct user URLs are HARD TARGETS.
+                    if isinstance(results, str):
+                        result_text = results
+
+                        import re
+                        return re.findall(
+                            r'https?://[^\s\n<>"\')\]]+',
+                            result_text,
+                        )
+
+                    if isinstance(results, dict):
+                        result_text = results.get("result", "")
+
+                        if not isinstance(result_text, str):
+                            result_text = str(result_text or "")
+
+                        import re
+                        return re.findall(
+                            r'https?://[^\s\n<>"\')\]]+',
+                            result_text,
+                        )
+
+                    logger.warning(
+                        "[AUDIT SKILL EXEC] req_id=%s query=%s "
+                        "unsupported_result=%r",
+                        req_id,
+                        q,
+                        type(results).__name__,
+                    )
+                    return []
+                # Direct user URLs and node target URLs are HARD TARGETS.
                 # Fetch the exact target first instead of searching for generic
                 # procedures to access the target.
-                if direct_urls:
+                node_target = k.get("target")
+                if node_target:
+                    logger.info(
+                        "[AUDIT REQ TARGET MODE] req_id=%s topic=%s target=%s",
+                        req_id,
+                        topic,
+                        node_target,
+                    )
+                    all_urls = [node_target]
+                elif direct_urls and not k.get("is_recovery"):
                     logger.info(
                         "[AUDIT DIRECT TARGET MODE] req_id=%s topic=%s urls=%s",
                         req_id,
@@ -1021,15 +1640,18 @@ Return ONLY valid JSON:
                 selected_urls = []
                 mdn_selected = False
 
-                # Explicit user URLs have absolute priority.
-                # They are the exact targets requested by the user and must not
+                # Explicit user URLs and node target URLs have absolute priority.
+                # They are the exact targets requested and must not
                 # be rejected by generic search-result scoring.
                 for u in direct_urls:
                     if u in unique_urls and u not in selected_urls:
                         selected_urls.append(u)
 
+                if node_target and node_target in unique_urls and node_target not in selected_urls:
+                    selected_urls.append(node_target)
+
                 for u in unique_urls:
-                    if u in direct_urls:
+                    if u in direct_urls or u == node_target:
                         continue
 
                     if self.strategy.score_url(u, strategy) < 0.30:
@@ -1166,6 +1788,24 @@ Return ONLY valid JSON:
                             url,
                         )
 
+                # PATCH 9A: append after normal fetch, before the existing
+                # source-policy and relevance gates. Require actual web
+                # evidence so an embedded grid cannot replace web research.
+                has_web_evidence = any(
+                    str(e.get("url", "")).startswith(("http://", "https://"))
+                    for e in evidence_for_req
+                )
+                if has_web_evidence and embedded_user_evidence:
+                    for evidence in embedded_user_evidence:
+                        evidence_copy = {**evidence, "req_id": req_id}
+                        evidence_for_req.append(evidence_copy)
+                        all_evidence.append(evidence_copy)
+                    logger.info(
+                        "[AUDIT EMBEDDED INPUT] req_id=%s decision=APPEND_AFTER_FETCH documents=%d",
+                        req_id,
+                        len(embedded_user_evidence),
+                    )
+
                 latency.stop("fetch")
 
                 log_event(
@@ -1190,6 +1830,24 @@ Return ONLY valid JSON:
                         len(evidence_for_req),
                         [e.get("url") for e in evidence_for_req],
                     )
+
+                    # Apply explicit source constraints before relevance
+                    # validation so rejected sources cannot enter validation
+                    # cache or fact extraction.
+                    evidence_for_req = self._filter_evidence_by_source_policy(
+                        evidence_for_req,
+                        plan.get("constraints", []),
+                    )
+
+                    if not evidence_for_req:
+                        logger.warning(
+                            "[AUDIT REQUIREMENT EVIDENCE GAP] "
+                            "req_id=%s topic=%s reason=source_policy",
+                            req_id,
+                            topic,
+                        )
+                        kg.update_status(req_id, "partial")
+                        return 0
 
                     # P0: validate evidence against the CURRENT requirement
                     # before allowing fact extraction.
@@ -1231,7 +1889,12 @@ Return ONLY valid JSON:
                     )
 
                     t0 = time.time()
-                    checklist = [{"field_id": "facts", "label": "All facts"}]
+                    checklist = [
+                        {
+                            "field_id": req_id,
+                            "label": f"{topic}: {need}",
+                        }
+                    ]
 
                     logger.info("=" * 80)
                     logger.info(
@@ -1300,6 +1963,22 @@ Return ONLY valid JSON:
                     # Jangan dipotong di level node.
                     ranked = dict(ranked.items())
 
+                    # PATCH 9A: user input can reach extraction but cannot be
+                    # persisted or satisfy a req_id/ requirement completion.
+                    persistent_ranked = {
+                        field: fact
+                        for field, fact in ranked.items()
+                        if isinstance(fact, dict)
+                        and str(fact.get("source", "")) != "user://request"
+                    }
+                    logger.info(
+                        "[AUDIT EMBEDDED INPUT] req_id=%s ranked=%d persistent=%d transient=%d",
+                        req_id,
+                        len(ranked),
+                        len(persistent_ranked),
+                        len(ranked) - len(persistent_ranked),
+                    )
+
                     logger.info(
                         "[AUDIT RANKED FACTS] req_id=%s topic=%s count=%d fields=%s",
                         req_id,
@@ -1314,6 +1993,20 @@ Return ONLY valid JSON:
                         [{"field_id": k, "label": k} for k in ranked.keys()],
                         ranked,
                         evidence_for_req,
+                    )
+
+                    logger.info(
+                        "[AUDIT EVALUATE RAW] req_id=%s filled=%d empty=%d "
+                        "coverage=%.1f weighted=%.1f sufficient=%s combined=%.1f "
+                        "source_types=%s",
+                        req_id,
+                        eval_result.get("filled", 0),
+                        eval_result.get("empty", 0),
+                        eval_result.get("coverage_pct", 0.0),
+                        eval_result.get("weighted_score", 0.0),
+                        eval_result.get("sufficient", False),
+                        eval_result.get("combined_score", 0.0),
+                        eval_result.get("source_types", []),
                     )
 
                     logger.info(
@@ -1338,20 +2031,22 @@ Return ONLY valid JSON:
                         },
                     )
 
-                    if eval_result["coverage_pct"] >= self.MIN_COVERAGE:
-                        kg.learn(req_id, ranked, plan)
+                    if (
+                        eval_result["coverage_pct"] >= self.MIN_COVERAGE
+                        and persistent_ranked
+                    ):
+                        kg.learn(req_id, persistent_ranked, plan)
 
-                        # Simpan hanya facts hasil extraction run ini.
-                        # Historical facts di persistent KG tidak masuk
-                        # ke synthesis.
+                        # Only web/non-transient facts may satisfy the
+                        # requirement or enter persistent KG. The canonical
+                        # grid remains under request_input_facts.
                         with request_facts_lock:
-                            for field, fact in ranked.items():
-                                if isinstance(fact, dict):
-                                    request_facts[f"{req_id}/{field}"] = {
-                                        "value": fact.get("value"),
-                                        "source": fact.get("source", "unknown"),
-                                        "source_type": fact.get("source_type", "other"),
-                                    }
+                            for field, fact in persistent_ranked.items():
+                                request_facts[f"{req_id}/{field}"] = {
+                                    "value": fact.get("value"),
+                                    "source": fact.get("source", "unknown"),
+                                    "source_type": fact.get("source_type", "other"),
+                                }
 
                         kg.update_status(req_id, "found")
                     else:
@@ -1400,9 +2095,31 @@ Return ONLY valid JSON:
                 coverage,
             )
             if total_f >= self.MAX_TOTAL_FACTS:
-                logger.info(f"[orchestrator] early stop: {total_f} facts")
-                break
-            if coverage >= self.EARLY_STOP_COVERAGE and total_f >= self.MIN_FACTS_TO_STOP:
+                retryable = any(
+                    not request_requirement_complete(req_id)
+                    and retry_count.get(req_id, 0) < self.MAX_RETRIES
+                    for req_id in requirement_map
+                )
+
+                logger.info(
+                    "[AUDIT FACT LIMIT] facts=%d limit=%d retryable_requirements=%s",
+                    total_f,
+                    self.MAX_TOTAL_FACTS,
+                    retryable,
+                )
+
+                if not retryable:
+                    logger.info(f"[orchestrator] early stop: {total_f} facts")
+                    break
+            if (
+                coverage >= self.EARLY_STOP_COVERAGE
+                and total_f >= self.MIN_FACTS_TO_STOP
+                and not any(
+                    not request_requirement_complete(req_id)
+                    and retry_count.get(req_id, 0) < self.MAX_RETRIES
+                    for req_id in requirement_map
+                )
+            ):
                 logger.info(f"[orchestrator] early stop: coverage={coverage:.0f}% with {total_f} facts")
                 break
 
@@ -1425,7 +2142,9 @@ Return ONLY valid JSON:
         # 4. Build answer
         # Synthesis hanya memakai facts yang dibuat selama research run ini.
         # Persistent KnowledgeGraph tetap menyimpan historical facts.
-        all_facts = dict(request_facts)
+        # PATCH 9A: semantic fulfillment and synthesis see the
+        # canonical grid, but it remains outside persistent KG and req_id/.
+        all_facts = {**request_facts, **request_input_facts}
 
         _this_request_nodes = set(requirement_map.keys()) | {goal}
         _own = sum(
@@ -1461,10 +2180,29 @@ Return ONLY valid JSON:
         with_facts = sum(
             1 for r in requirement_audit if r["facts"] > 0
         )
-        missing = [
-            r for r in requirement_audit
-            if r["evidence"] == 0 or r["facts"] == 0
-        ]
+        # Semantic completeness is evaluated at research-goal level.
+        # success_criteria belongs to the complete plan, so it must be
+        # evaluated against all facts collected for this request rather
+        # than against each individual requirement node.
+        semantic_topic = plan.get("goal", goal)
+        semantic_need = "research goal fulfillment"
+
+        semantic_fulfilled, semantic_reason, semantic_missing = (
+            self._evaluate_requirement_fulfillment(
+                semantic_topic,
+                semantic_need,
+                plan.get("success_criteria", []),
+                all_facts,
+                semantic_completion_cache,
+            )
+        )
+
+        missing = [] if semantic_fulfilled else requirement_audit
+
+        for r in requirement_audit:
+            r["semantic_fulfilled"] = semantic_fulfilled
+            r["semantic_reason"] = semantic_reason
+            r["semantic_missing"] = semantic_missing
 
         logger.info(
             "[AUDIT REQUIREMENT COVERAGE] total=%d with_evidence=%d "
@@ -1486,6 +2224,14 @@ Return ONLY valid JSON:
                 r["facts"],
             )
 
+        research_incomplete = bool(missing)
+
+        logger.info(
+            "[AUDIT RESEARCH COMPLETENESS] complete=%s missing=%d",
+            not research_incomplete,
+            len(missing),
+        )
+
         logger.info(
             "[AUDIT SYNTHESIS] total_all_facts=%d own_request_facts=%d foreign_facts=%d "
             "nodes_this_request=%d nodes_total_in_kg=%d",
@@ -1493,12 +2239,67 @@ Return ONLY valid JSON:
             len(_this_request_nodes), len(kg.graph["nodes"]),
         )
 
+        # PATCH 6: fail-closed on zero extracted facts. Proven live on two
+        # independent traces that the synthesis LLM fabricates a complete
+        # answer (fake prices, fake sources not present anywhere in the
+        # evidence) even when EXTRACTED FACTS is explicitly {} and the
+        # prompt already forbids fabrication -- prompt-only enforcement is
+        # not enough. Skip the synthesis LLM call entirely in this case and
+        # return a deterministic incomplete-status answer built only from
+        # requirement_audit/missing (already computed above), so there is
+        # no LLM in the loop that could hallucinate when there is nothing
+        # to synthesize from.
+        if not all_facts:
+            logger.warning(
+                "[SYNTHESIS SKIP] zero facts extracted -- returning incomplete "
+                "status without calling the synthesis LLM"
+            )
+            missing_topics = [r["topic"] for r in missing] or [
+                r["topic"] for r in requirement_audit
+            ]
+            if missing_topics:
+                answer = (
+                    "Riset tidak dapat diselesaikan: tidak ada fakta terverifikasi "
+                    "yang berhasil diekstrak dari sumber yang ditemukan.\n\n"
+                    "Requirement yang belum terpenuhi:\n"
+                    + "\n".join(f"- {t}" for t in missing_topics)
+                )
+            else:
+                answer = (
+                    "Riset tidak dapat diselesaikan: tidak ada fakta terverifikasi "
+                    "yang berhasil diekstrak dari sumber yang ditemukan."
+                )
+
+            kg.save()
+
+            log_event(
+                "research_done",
+                {
+                    "goal": goal,
+                    "pipeline": pipeline_type,
+                    "iterations": iterations_completed,
+                    "facts": 0,
+                    "duration_ms": (time.time() - t0_total) * 1000,
+                },
+            )
+
+            return {
+                "goal": goal, "answer": answer,
+                "facts_count": 0, "iterations": iterations_completed,
+                "pipeline": pipeline_type, "graph_stats": kg.get_stats(),
+                "token_profile": profiler.summary(), "latency_profile": latency.summary(),
+                "api_cost": profiler.total_cost, "duration_ms": (time.time() - t0_total) * 1000,
+            }
+
         # Facts already carry the primary evidence.  Keep a compact raw
         # excerpt only from sources that actually produced facts, so the
         # synthesis prompt is not inflated by duplicate search results.
         synthesis_evidence = [e for e in all_evidence if e.get("had_facts")]
         if not synthesis_evidence:
-            synthesis_evidence = all_evidence
+            synthesis_evidence = [
+                {**e, "content": "[content withheld: no verified facts extracted from this source]"}
+                for e in all_evidence
+            ]
         evidence_text = "\n\n".join([
             f"[{e.get('doc_type','?')}] {e['url']}\n{e['content'][:400]}"
             for e in synthesis_evidence[:4]
@@ -1515,6 +2316,25 @@ Return ONLY valid JSON:
             len(evidence_text),
         )
 
+        completeness_context = (
+            "RESEARCH STATUS: COMPLETE. "
+            "All planned requirements have evidence and facts."
+            if not research_incomplete
+            else
+            "RESEARCH STATUS: INCOMPLETE. "
+            "One or more planned requirements lack sufficient evidence or facts. "
+            "STRICT RULES: Do not present the research as complete. "
+            "Explicitly report the missing requirements. "
+            "Do not fabricate values. "
+            "Do not make technical recommendations that depend on missing evidence. "
+            "Do not introduce technical claims or inferences absent from EXTRACTED FACTS "
+            "or SOURCE MATERIAL. "
+            "Do not recommend an alternative that contradicts the user's requested "
+            "configuration merely because the requested configuration is insufficiently researched. "
+            "If the requested configuration cannot yet be determined safely from the available "
+            "evidence, say so and identify the missing evidence."
+        )
+
         system_prompt = f"""Technical Research Assistant.
 📊 {len(all_facts)} facts collected.
 
@@ -1528,12 +2348,20 @@ Use it only to resolve user/project context when relevant.
 EXTRACTED FACTS:
 {compact_facts}
 
+RESEARCH COMPLETENESS:
+{completeness_context}
+
 SOURCE MATERIAL:
 {evidence_text}
 
-Gunakan EXTRACTED FACTS sebagai sumber utama.
-Gunakan SOURCE MATERIAL hanya bila diperlukan.
-Jangan mengarang.
+FACT FIDELITY:
+- Preserve the exact meaning of every extracted fact.
+- Do not negate, reverse, or alter factual values.
+- For status, approval state, numeric values, URLs, and technical terms, preserve the source fact's meaning exactly.
+
+Use EXTRACTED FACTS as the primary factual source.
+Use SOURCE MATERIAL only when necessary.
+Do not invent facts.
 
 SOURCE CONTEXT MATCHING:
 1. Untuk setiap benchmark, measurement, atau performance figure, periksa apakah kondisi pengujiannya sesuai dengan kondisi yang diminta user.

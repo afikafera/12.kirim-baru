@@ -121,11 +121,12 @@ def health():
 @app.get("/v1/models")
 @app.get("/models")
 def list_models():
+    model_ids = sorted(llm.providers.keys()) if hasattr(llm, "providers") and llm.providers else ["deepseek-chat"]
     return {
         "object": "list",
         "data": [
-            {"id": "deepseek-chat", "object": "model"},
-            {"id": "9router", "object": "model"}
+            {"id": model_id, "object": "model"}
+            for model_id in model_ids
         ]
     }
 

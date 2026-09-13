@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Hermes Execution Trace — cf58e6b5df2b",
+    "quality_profile": "showcase",
+    "animation": "trace"
+  },
+  "participants": [
+    {
+      "id": "orchestrator",
+      "type": "backend",
+      "label": "Hermes Orchestrator"
+    },
+    {
+      "id": "planner",
+      "type": "backend",
+      "label": "Planner"
+    },
+    {
+      "id": "search",
+      "type": "external",
+      "label": "Web Search"
+    },
+    {
+      "id": "fetch",
+      "type": "external",
+      "label": "Document Fetch"
+    },
+    {
+      "id": "extract",
+      "type": "backend",
+      "label": "Evidence Extractor"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m1",
+      "from": "orchestrator",
+      "to": "planner",
+      "y": 180,
+      "label": "planner_done"
+    },
+    {
+      "id": "m2",
+      "from": "orchestrator",
+      "to": "search",
+      "y": 240,
+      "label": "search_start × 3"
+    },
+    {
+      "id": "m3",
+      "from": "search",
+      "to": "orchestrator",
+      "y": 300,
+      "label": "search_done"
+    },
+    {
+      "id": "m4",
+      "from": "orchestrator",
+      "to": "fetch",
+      "y": 360,
+      "label": "fetch"
+    },
+    {
+      "id": "m5",
+      "from": "fetch",
+      "to": "orchestrator",
+      "y": 420,
+      "label": "fetch_done"
+    },
+    {
+      "id": "m6",
+      "from": "orchestrator",
+      "to": "extract",
+      "y": 480,
+      "label": "extract"
+    },
+    {
+      "id": "m7",
+      "from": "extract",
+      "to": "orchestrator",
+      "y": 540,
+      "label": "extract_done"
+    },
+    {
+      "id": "m8",
+      "from": "orchestrator",
+      "to": "orchestrator",
+      "y": 600,
+      "label": "iteration_done"
+    },
+    {
+      "id": "m9",
+      "from": "orchestrator",
+      "to": "orchestrator",
+      "y": 660,
+      "label": "research_done"
+    }
+  ]
+}

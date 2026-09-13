@@ -82,6 +82,13 @@ Tugas Anda: Apakah ada knowledge PENTING yang BELUM disebut?
 - JANGAN duplikasi yang sudah ada.
 - Maksimum {self.MAX_ADDITIONS} knowledge tambahan.
 - topic harus SPESIFIK dan bisa dicari (maks 80 karakter, maks 10 kata).
+- Jika Goal atau knowledge yang sudah terdaftar menyebut entity/model
+  spesifik, knowledge tambahan yang bergantung pada entity tersebut harus
+  mempertahankan entity/model tersebut.
+- Jangan menghapus entity/model hanya untuk memenuhi batas panjang topic.
+- Jangan mengganti entity/model spesifik dengan kategori generic jika
+  entity tersebut sudah ditetapkan secara eksplisit dalam Goal atau
+  knowledge yang sudah terdaftar.
 - need harus salah satu dari: {', '.join(sorted(self.VALID_NEEDS))}
 - Kalau tidak ada yang kurang, return: {{"missing_knowledge": []}}
 

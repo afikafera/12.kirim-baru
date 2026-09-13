@@ -1,0 +1,252 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Hermes Trace cf58e6b5df2b",
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "core",
+      "label": "Hermes Core"
+    },
+    {
+      "id": "tools",
+      "label": "Search / Evidence"
+    }
+  ],
+  "phases": [
+    {
+      "id": "planning",
+      "label": "Planning",
+      "fromCol": 0,
+      "toCol": 1,
+      "variant": "emphasis"
+    },
+    {
+      "id": "execution",
+      "label": "Search + Fetch",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "dashed"
+    },
+    {
+      "id": "completion",
+      "label": "Evaluation",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "default"
+    }
+  ],
+  "groups": [
+    {
+      "id": "planner_loop",
+      "label": "Planner / Iteration Loop",
+      "lane": "core",
+      "fromCol": 0,
+      "toCol": 1,
+      "variant": "emphasis"
+    },
+    {
+      "id": "evidence_work",
+      "label": "Evidence Acquisition",
+      "lane": "tools",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "research_start",
+    "planner",
+    "search",
+    "fetch",
+    "extract",
+    "evaluation",
+    "research_done"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "research_start"
+    ],
+    "allowedTerminals": [
+      "research_done"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "research_start",
+      "lane": "core",
+      "col": 0,
+      "type": "external",
+      "label": "Research Start",
+      "sublabel": "incoming goal",
+      "width": 132
+    },
+    {
+      "id": "planner",
+      "lane": "core",
+      "col": 1,
+      "type": "backend",
+      "label": "Planner",
+      "sublabel": "requirements + iterations",
+      "width": 132
+    },
+    {
+      "id": "search",
+      "lane": "tools",
+      "col": 2,
+      "type": "cloud",
+      "label": "Search",
+      "sublabel": "web discovery",
+      "width": 132,
+      "tag": "9 calls"
+    },
+    {
+      "id": "fetch",
+      "lane": "tools",
+      "col": 3,
+      "type": "cloud",
+      "label": "Fetch",
+      "sublabel": "documents",
+      "width": 132,
+      "tag": "9 batches"
+    },
+    {
+      "id": "extract",
+      "lane": "tools",
+      "col": 4,
+      "type": "backend",
+      "label": "Extract",
+      "sublabel": "evidence extraction",
+      "width": 132,
+      "tag": "1 start"
+    },
+    {
+      "id": "iteration",
+      "lane": "core",
+      "col": 2,
+      "type": "messagebus",
+      "label": "Iteration Loop",
+      "sublabel": "3 iterations",
+      "tag": "trace driven",
+      "width": 132
+    },
+    {
+      "id": "evaluation",
+      "lane": "core",
+      "col": 4,
+      "type": "backend",
+      "label": "Evaluation",
+      "sublabel": "facts=0, coverage=0.0",
+      "width": 132
+    },
+    {
+      "id": "research_done",
+      "lane": "core",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Research Done",
+      "sublabel": "final pipeline result",
+      "width": 132
+    }
+  ],
+  "edges": [
+    {
+      "id": "start-planner",
+      "from": "research_start",
+      "to": "planner",
+      "label": "goal",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "planner-search",
+      "from": "planner",
+      "to": "search",
+      "label": "3 iterations",
+      "variant": "default",
+      "role": "main"
+    },
+    {
+      "id": "search-fetch",
+      "from": "search",
+      "to": "fetch",
+      "label": "9 searches",
+      "variant": "default",
+      "role": "main"
+    },
+    {
+      "id": "fetch-extract",
+      "from": "fetch",
+      "to": "extract",
+      "label": "9 fetch batches",
+      "variant": "default",
+      "role": "main"
+    },
+    {
+      "id": "extract-evaluation",
+      "from": "extract",
+      "to": "evaluation",
+      "label": "evaluate evidence",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "extract-iteration",
+      "from": "extract",
+      "to": "iteration",
+      "label": "evidence",
+      "variant": "dashed",
+      "role": "return",
+      "route": "auto"
+    },
+    {
+      "id": "iteration-planner",
+      "from": "iteration",
+      "to": "planner",
+      "label": "next iteration",
+      "variant": "dashed",
+      "role": "branch",
+      "route": "auto"
+    },
+    {
+      "id": "iteration-evaluation",
+      "from": "iteration",
+      "to": "evaluation",
+      "label": "facts=0, coverage=0.0",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "evaluation-done",
+      "from": "evaluation",
+      "to": "research_done",
+      "variant": "emphasis",
+      "role": "main"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Trace Summary",
+      "items": [
+        "request_id: cf58e6b5df2b",
+        "iterations: 3",
+        "search calls: 9",
+        "fetch batches: 9"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Evidence Result",
+      "items": [
+        "facts: 0",
+        "coverage: 0.0",
+        "Trace ended without extracted facts"
+      ]
+    }
+  ]
+}

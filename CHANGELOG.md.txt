@@ -1,0 +1,1347 @@
+## 2026-09-05 — FIX: URL extraction trailing delimiter
+
+### Defect
+Orchestrator `search_one()` reparsed the string returned by Aran Reach
+using `re.findall(r'(https?://[^\s\n]+)', result_text)`. Exa highlights
+can contain quoted example URLs inside content, causing the closing quote
+to be captured as part of the URL.
+
+Verified malformed runtime candidate:
+`https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd"`
+
+### Root Cause
+The malformed URL was produced during orchestrator URL extraction from the
+combined search-result string. Exa `ExaResult.url`, Google CSE/SearXNG raw
+URLs, SkillBridge, and agent-reach executor were verified not to introduce
+the trailing quote.
+
+### Fix
+Restricted both `result_text` URL extraction regex occurrences in
+`hermes_agent/orchestrator.py` to terminate on quote/bracket delimiters.
+
+### Verification
+- Exa direct result URLs: PASS, clean.
+- Google CSE/SearXNG raw URLs: PASS, clean.
+- Isolated URL extraction regression: PASS.
+- `python3 -m py_compile hermes_agent/orchestrator.py`: PASS.
+- Controlled Hermes runtime request: PASS.
+- Malformed `api.coingecko.com/...usd"` candidate: absent after patch.
+- Valid CoinGecko candidate/fetch path: PASS.
+- CoinGecko official connector invoked: PASS.
+- Official CoinGecko price/timestamp extracted as facts: PASS.
+- Semantic requirement gate: FULFILLED.
+- Research completeness: COMPLETE.
+- Synthesis received 3 request-local facts and 0 foreign facts.
+
+### Status
+CLOSED
+
+\n
+## 2026-09-05 — CoinGecko Official API Connector
+
+- Added `CoinGeckoConnector` under `aran_search/connectors/` for canonical CoinGecko coin URLs.
+- CoinGecko price acquisition now uses the official CoinGecko API instead of relying on the JS-heavy webpage.
+- Validated Bitcoin and Ethereum runtime fetches with USD price and `last_updated_at` timestamp.
+- Fixed error-path control flow: `coin_not_found` returned by the official API is now terminal and no longer falls through to Browser/Jina fallback.
+- Runtime regression passed for valid Bitcoin, valid Ethereum, and invalid coin URL.
+- `python3 -m py_compile aran_search/searcher.py` passed.
+- Browser human-verification path was not invoked for the invalid CoinGecko URL after the fix.
+
+## 2026-09-10
+
+### PATCH 8A — Requirement-scoped Fact Extraction
+
+DATE:
+2026-09-10
+
+FILE:
+hermes_agent/fact_checker.py
+
+PROBLEM:
+`extract_facts_batch()` menerima `checklist`, tetapi extraction prompt sebelumnya
+tidak menggunakan checklist sebagai research scope. Extractor bersifat terlalu
+umum dan berpotensi mengambil substantive facts yang tidak diperlukan oleh
+active requirement.
+
+HYPOTHESIS:
+Jika extraction prompt diberi research requirements dan explicit extraction
+scope, extractor akan lebih fokus pada facts yang diperlukan dan mengurangi
+unrelated facts serta token/payload overhead.
+
+EVIDENCE:
+Baseline harness menunjukkan requirement markers tidak masuk ke prompt:
+`btc_current_price`, `Current BTC price`, `timestamp`, dan
+`compare two sources` semuanya FALSE.
+
+Candidate scope harness menunjukkan seluruh requirement markers masuk ke prompt
+dan menghasilkan hanya required facts tanpa unrelated liquidity/market facts.
+
+PATCH:
+Menambahkan `RESEARCH REQUIREMENTS` dan `EXTRACTION SCOPE` ke prompt
+`extract_facts_batch()`, menggunakan checklist yang sudah diterima fungsi.
+Existing extraction rules tetap dipertahankan.
+
+TEST:
+`test_patch8_scope.py`
+Candidate scope harness.
+
+RESULT:
+PASS.
+Requirement scope masuk ke extraction prompt.
+Required facts tetap dapat diekstraksi.
+Unrelated liquidity/market facts = 0 pada controlled harness.
+
+STATUS:
+VERIFIED
+
+
+### PATCH 8B — Production Requirement Scope Propagation
+
+DATE:
+2026-09-10
+
+FILE:
+hermes_agent/orchestrator.py
+
+PROBLEM:
+Dua production callers `extract_facts_batch()` masih mengirim checklist generik:
+
+`{"field_id": "facts", "label": "All facts"}`
+
+Akibatnya PATCH 8A belum menerima requirement scope yang sebenarnya dari
+orchestrator.
+
+HYPOTHESIS:
+Jika caller mengirim `req_id` dan `topic + need` sebagai checklist, extraction
+scope akan mengikuti active research requirement secara nyata di production.
+
+EVIDENCE:
+Source audit menemukan dua caller production pada attachment path dan normal
+requirement path yang menggunakan `All facts`.
+
+Production controlled test setelah patch menunjukkan requirement-specific
+`req_id`, misalnya:
+
+`current Bitcoin price from CoinMarketCap [real-time BTC price data and timestamp]`
+
+Pada request sederhana:
+- evidence selected = 1
+- extracted facts = 1
+- synthesis facts_chars = 205
+
+Pada request yang secara eksplisit meminta minimal 2 sumber:
+- evidence_for_req = 2
+- extracted facts = 2
+- synthesis evidence_sources = 2
+- synthesis facts_chars = 611
+
+Ini menunjukkan extraction scope menjadi lebih efisien tanpa menghilangkan
+kemampuan memenuhi request multi-source ketika requirement memang memintanya.
+
+PATCH:
+Mengganti checklist generik pada dua production callers dengan:
+
+`field_id = req_id`
+`label = f"{topic}: {need}"`
+
+Tidak mengubah extraction logic, ranking, evaluator, atau completion logic.
+
+TEST:
+`python3 -m py_compile hermes_agent/orchestrator.py`
+Controlled production BTC research requests.
+Audit `/tmp/hermes-api.log`.
+
+RESULT:
+PASS.
+Tidak ada lagi `All facts` pada dua active extraction callers.
+Requirement-specific scope diteruskan ke FactChecker.
+Controlled production extraction menghasilkan payload yang lebih kecil.
+Multi-source request tetap menghasilkan dua evidence/two facts.
+
+STATUS:
+VERIFIED
+
+
+### Follow-up Audit — Deterministic Validation / Planner Scope
+
+DATE:
+2026-09-10
+
+FILE:
+hermes_agent/task_planner.py
+hermes_agent/orchestrator.py
+
+PROBLEM:
+Sudoku validation request memicu beberapa web research requirements dan
+multiple fetch/relevance-validation LLM calls, meskipun input sudah berisi
+papan Sudoku lengkap.
+
+EVIDENCE:
+Production log menunjukkan requirements:
+- `Sudoku rules for 3x3 subgrid uniqueness`
+- `Sudoku puzzle validity checking procedure`
+- `Duplicate digit detection in Sudoku subgrids`
+
+Search/fetch kemudian berjalan pada banyak URLs dan terdapat fetch timeout.
+Planner juga mengalami two `finish_reason=length` attempts sebelum menghasilkan
+usable plan.
+
+HYPOTHESIS:
+Planner atau post-planner completeness logic mungkin menghasilkan requirement
+yang redundant/overlapping untuk deterministic validation tasks.
+
+STATUS:
+OPEN
+
+NEXT:
+Audit apakah tiga Sudoku requirements berasal langsung dari TaskPlanner atau
+ditambahkan/diubah oleh CompletenessChecker sebelum membuat patch.
+
+Berikut changelog yang bisa langsung dipindahkan ke `CHANGELOG_HANDOFF.md`:
+
+```markdown
+## 2026-09-10 — PATCH 9A Embedded Structured User Data
+
+### Status
+- PATCH 9A: **DIAGNOSIS VERIFIED**
+- Production patch: **APPLIED**
+- Production syntax check: **PASS**
+- Deterministic harness: **7/7 PASS**
+- Runtime verification: **FAILED / OPEN**
+- Regression: **NOT YET VERIFIED**
+
+### Objective
+Preserve structured data embedded directly in the user's request as request-local evidence/facts, without:
+- treating the entire user instruction/goal as evidence;
+- requiring the data to arrive as an attachment;
+- persisting transient user-provided structured data into the persistent Knowledge Graph.
+
+### Production Changes
+`hermes_agent/orchestrator.py` was patched to:
+
+1. Extract an embedded Sudoku 9x9 grid from the current request.
+2. Represent the extracted grid as request-local user evidence:
+   - `source_type=user_input`
+   - `evidence_type=user_input`
+   - `doc_type=user_input`
+   - `url=user://request`
+   - `transient=True`
+3. Store the corresponding fact under:
+   - `input/user_sudoku_grid`
+4. Merge request-local input facts into:
+   - `all_facts`
+5. Exclude `user://request` facts from the persistent KG learning path.
+6. Keep transient input facts available to semantic fulfillment/synthesis.
+
+### Additional Extractor Correction
+The first production extractor implementation required a strict triple-backtick fence:
+
+```python
+if stripped.startswith("```"):
+```
+
+Runtime testing showed that the actual request representation reaching `research(goal)` used single-backtick formatting wrapped by markdown formatting, e.g.:
+
+```text
+**`
+5 3 . | . 7 . | . . .
+...
+`**
+```
+
+Therefore the extractor did not enter its fence state and returned `None`.
+
+This explains the observed runtime result:
+
+```text
+[AUDIT SYNTHESIS] total_all_facts=16 own_request_facts=16
+```
+
+while semantic validation reported that the actual Sudoku configuration was missing.
+
+### Evidence Chain
+Confirmed:
+
+```text
+RAW REQUEST
+    ↓
+USER_MSG
+    ↓
+research(goal)
+```
+
+The Sudoku grid is present in `USER_MSG` and therefore the API/request boundary is not the loss point.
+
+The loss occurs at the embedded structured-data extraction stage because the extractor's fence assumption does not match the runtime representation.
+
+### Verification Performed
+
+Deterministic PATCH 9A harness:
+
+```text
+VERIFY complete: 7/7 deterministic PATCH 9A contracts PASS
+```
+
+Production syntax:
+
+```text
+py_compile: PASS
+```
+
+Controlled runtime request:
+
+- `USER_MSG` contained the complete Sudoku grid.
+- Attachment evidence remained `0`, as expected because the grid was embedded in the user message.
+- `total_all_facts=16`
+- Semantic validation still reported the actual Sudoku configuration as missing.
+- No `user://request` / `input/user_sudoku_grid` markers appeared in runtime logs.
+
+### Root Cause Confirmed
+
+The production extractor was too strict about Markdown fence syntax.
+
+Runtime-normalized user content used single backticks, while the extractor only recognized triple backticks.
+
+Result:
+
+```text
+embedded Sudoku grid
+        ↓
+extractor returns None
+        ↓
+request_input_facts remains empty
+        ↓
+all_facts contains only normal request facts
+        ↓
+semantic validation cannot see the Sudoku configuration
+```
+
+### Current Open Issue
+
+The exact minimal production correction for accepting the runtime-normalized single-backtick representation has **not yet been applied**.
+
+Before applying it, a dedicated unit/reproduction test should be corrected to import the actual orchestrator structure. The initial test attempt incorrectly assumed an `Orchestrator` class exists and failed with:
+
+```text
+ImportError:
+cannot import name 'Orchestrator'
+```
+
+No production code was changed by that failed test.
+
+### Next Step
+
+1. Inspect the actual class/module structure around `_extract_embedded_sudoku_grid`.
+2. Build a direct extractor reproduction test against the actual implementation.
+3. Verify the runtime-format case fails before patch.
+4. Apply the smallest safe extractor correction.
+5. Run `py_compile`.
+6. Run deterministic harness/regression.
+7. Repeat one controlled Sudoku request.
+8. Verify:
+   - `input/user_sudoku_grid` exists;
+   - grid reaches `all_facts`;
+   - semantic validation can see the grid;
+   - `user://request` does not enter persistent KG;
+   - normal research behavior remains intact.
+
+### Important
+Do not classify PATCH 9A as **FIXED** until controlled runtime verification and regression both pass.
+
+---
+
+## Separate Open Issue — PATCH 9B
+
+Planner over-decomposition remains a separate issue.
+
+It is **not included in PATCH 9A** and must not be patched as part of the embedded-user-data correction.
+```
+
+
+## 2026-09-11 — Binance Futures Connector
+
+DATE:
+2026-09-11
+
+FILE:
+aran_search/connectors/binance_futures.py
+aran_search/searcher.py
+
+PROBLEM:
+Production Binance BTCUSDT research menemukan URL resmi
+https://www.binance.com/en/futures/BTCUSDT, tetapi Hermes hanya memiliki
+Binance Spot connector yang menggunakan /api/v3/ticker/24hr.
+URL Futures tidak dapat diproses melalui connector Spot tanpa mencampur
+semantik Spot dan Futures.
+
+HYPOTHESIS:
+Diperlukan connector read-only Binance Futures terpisah yang menggunakan
+official Binance USDⓈ-M Futures API dan diintegrasikan sebelum Binance Spot
+connector.
+
+EVIDENCE:
+Production log menunjukkan URL /futures/BTCUSDT sebelumnya masuk fallback
+browser/Jina. Audit source membuktikan BinanceConnector hanya mengenali
+/trade/PAIR dan menggunakan /api/v3/ticker/24hr.
+Official Futures endpoint fapi.binance.com/fapi/v1/ticker/24hr berhasil
+mengembalikan HTTP 200 untuk BTCUSDT.
+
+PATCH:
+Menambahkan BinanceFuturesConnector dengan:
+- strict /futures/<SYMBOL> URL detection
+- symbol extraction
+- official USDⓈ-M Futures /fapi/v1/ticker/24hr
+- read-only market data
+- timestamp normalization
+- structured error handling
+- connector integration di searcher.py
+Binance Spot connector tidak diubah.
+
+TEST:
+- Binance Futures standalone connector test: PASS
+- Binance Spot + Futures regression: PASS
+- Spot/Futures isolation: PASS
+- py_compile binance.py: PASS
+- py_compile binance_futures.py: PASS
+- py_compile searcher.py: PASS
+- Production BTCUSDT request: PASS
+- Evidence Gate: ACCEPT
+- Semantic requirement: FULFILLED
+- own_request_facts=2
+- foreign_facts=0
+
+RESULT:
+Hermes berhasil mengambil BTCUSDT Futures melalui official Binance Futures
+API, meneruskan evidence dan facts ke pipeline, mempertahankan provenance
+ke URL Binance Futures, dan memenuhi semantic requirement.
+
+STATUS:
+VERIFIED
+
+## 2026-09-12
+
+### Follow-up Audit — Planner Routing / Polymarket Date Anchor
+
+DATE:
+2026-09-12
+
+FILE:
+hermes_agent/task_planner.py
+hermes_agent/orchestrator.py
+
+PROBLEM:
+Production research untuk market cuaca Polymarket Manila pada 12 September
+2026 masih menghasilkan research INCOMPLETE.
+
+HYPOTHESIS:
+Round-robin model routing pada Planner dapat menggunakan model berbeda antara
+attempt/retry sehingga hasil planning tidak deterministic. Hal ini harus
+distabilkan sebelum efektivitas Entity/Date Anchor dapat dinilai secara valid.
+
+EVIDENCE:
+Production trace sebelumnya menunjukkan retry Planner dapat berpindah model
+antar attempt.
+
+Test Polymarket menunjukkan requirement utama dapat menemukan kandidat market,
+tetapi evidence yang akhirnya diproses berisi market Manila untuk tanggal yang
+salah (11/13 September), sehingga Evidence Gate menolak evidence tersebut.
+Requirement turunan kemudian ter-block karena dependency requirement utama
+berstatus partial.
+
+Fetch log menunjukkan Evidence Gate secara benar menolak evidence yang tidak
+sesuai tanggal 12 September.
+
+PATCH:
+Planner token budget sebelumnya telah dinaikkan menjadi [1536, 3072].
+
+Fetch result limit `[:2]` sebelumnya telah dihapus.
+
+Entity/Date Anchor patch telah diterapkan untuk test, tetapi belum dinyatakan
+VERIFIED.
+
+TEST:
+Production test market cuaca Polymarket Manila, 12 September 2026.
+
+RESULT:
+Planner token budget: PASS pada test sebelumnya.
+Fetch `[:2]` removal: PASS pada test sebelumnya.
+Anti-hallucination / completeness guard: PASS.
+Polymarket market-specific evidence: masih INCOMPLETE pada test ini.
+Probability, volume, liquidity, spread, dan resolution source market-specific
+belum berhasil masuk sebagai evidence yang cukup pada run ini.
+
+NEXT STEP:
+Stabilkan routing Planner agar satu logical planning request menggunakan model
+yang sama pada retry. Setelah itu ulangi test yang sama sebelum melakukan patch
+berikutnya.
+
+STATUS:
+OPEN
+
+## 2026-09-12 — PATCH: Direct Conversation Context
+
+### Root Cause
+`hermes_agent/orchestrator.py` pada direct path menggunakan:
+
+    direct_query = goal
+
+sehingga `context` yang sudah berhasil dibentuk oleh `api/main.py` dan diteruskan ke `HermesAgent.research()` tidak ikut dikirim ke LLM.
+
+Akibatnya follow-up query seperti:
+
+    bagaimana denganprediksi mu yes or no
+
+diterima LLM tanpa percakapan sebelumnya.
+
+### Patch
+Direct path sekarang menyisipkan:
+
+    CONVERSATION CONTEXT:
+    <context>
+
+    USER QUESTION:
+    <goal>
+
+System prompt juga secara eksplisit menginstruksikan LLM memperlakukan `CONVERSATION CONTEXT` sebagai diskusi sebelumnya.
+
+### Backup
+    hermes_agent/orchestrator.bak.direct_context_20260912_042341.py
+
+### Verification
+- Source patch: PASS
+- Backup: PASS
+- `py_compile`: PASS
+- `git diff`: PASS
+- Pre-patch Langfuse payload: context tidak ada
+- Post-patch Langfuse payload: context ~2,800 chars
+- Runtime follow-up: PASS
+- LLM berhasil menggunakan context sebelumnya
+- Polymarket Yes: 1.05%
+- Polymarket No: 98.95%
+
+### Status
+VERIFIED PASS
+
+### Scope
+Tidak mengubah Planner, Searcher, SemanticRouter, Analyzer, Evidence Pipeline, atau perubahan source lain yang sudah ada.
+
+# CHANGELOG
+
+## 2026-09-12
+
+### Binance Futures — PATCH 1: Funding Rate Metadata
+Status: VERIFIED PASS
+
+- Added Binance Futures `premiumIndex` integration.
+- Added metadata:
+  - last_funding_rate
+  - last_funding_rate_percent
+  - next_funding_time
+  - next_funding_time_utc
+  - mark_price
+  - index_price
+- `premiumIndex` failure is non-blocking; ticker data remains available.
+- Verified live BTCUSDT response.
+- Verified invalid-symbol handling (`-1121`).
+- Verified cache persistence.
+- Verified Spot/Futures isolation.
+- `py_compile`: PASS.
+- Backup:
+  `aran_search/connectors/binance_futures.bak.funding_rate_20260912_121420.py`
+
+### Binance Futures — PATCH 2: Evidence Formatter
+Status: VERIFIED PASS
+
+- Extended `searcher.py` Binance Futures evidence formatter.
+- Evidence now exposes:
+  - Mark price
+  - Index price
+  - Funding rate
+  - Next funding time
+- Existing ticker fields preserved.
+- Verified live Binance Futures evidence.
+- Verified Spot isolation.
+- `py_compile`: PASS.
+- Backup:
+  `aran_search/searcher.bak.futures_formatter_20260912_122306.py`
+
+### Research Completeness / Orchestrator Audit
+Status: AUDITED — NO PATCH
+
+- Audited `CompletenessChecker`.
+- Confirmed it operates as a pre-run plan reviewer, not a runtime completeness controller.
+- Audited `_evaluate_requirement_fulfillment()`.
+- Confirmed semantic fulfillment is evaluated after the current execution loop.
+- Confirmed `research_incomplete` is currently converted into synthesis instructions.
+- Confirmed there is no verified feedback path:
+  `INCOMPLETE → targeted requirement → capability execution → re-evaluation`.
+- Three Langfuse traces support the same structural gap:
+  - incomplete time-series prediction
+  - Polymarket refusal/direct path
+  - Polymarket weather research stopping after market discovery
+- Current architecture therefore behaves as a static/batch research pipeline rather than a dynamic continuation controller.
+
+### Controller Architecture Audit
+Status: NEXT AUDIT — NOT PATCHED
+
+Before implementing a controller loop, the following must be audited:
+
+- `requirement_map` lifecycle
+- requirement/node creation
+- node status transitions
+- `request_ready_nodes()`
+- `iterations_completed`
+- loop termination conditions
+- persistence of `all_facts` and evidence across iterations
+- whether new requirements can safely be injected into the active graph
+- existing retry/error mechanisms
+- whether continuation can be implemented without re-running the entire TaskPlanner
+
+HYPOTHESIS:
+Existing graph/state infrastructure may support dynamic requirement injection.
+
+EVIDENCE:
+Not yet sufficient. The termination gap is proven, but safe runtime graph injection has not yet been proven.
+
+RULE:
+No controller patch until the state/graph lifecycle audit proves a safe injection point.
+
+## 2026-09-12 — Phase 1 Minimal Controller: Dynamic Recovery Loop
+
+### Defect
+When all initial planned requirements were processed, orchestrator broke from the
+iteration loop immediately. If `_evaluate_requirement_fulfillment()` evaluated to
+`fulfilled=False`, the system only reported `RESEARCH STATUS: INCOMPLETE` to synthesis
+and halted without continuing execution, leaving multi-step tasks incomplete.
+
+### Root Cause
+`_evaluate_requirement_fulfillment()` was positioned after the execution loop rather than
+acting as an active continuation/termination gate. There was no mechanism to inject targeted
+recovery sub-requirements back into the graph when actionable entities existed in the state.
+
+### Fix
+1. Added `MAX_RECOVERY_ATTEMPTS = 1` class configuration.
+2. Added `_resolve_recovery_requirement()` adapter to generate targeted sub-requirements
+   from actionable entities/markets present in extracted facts.
+3. Added atomic 4-way state injection `_inject_recovery_requirement()` updating
+   `plan["knowledge_required"]`, `requirement_map`, `kg.nodes`, and `request_scope`.
+4. Transformed the `if not ready:` exit condition in `orchestrator.py` while-loop into an
+   active fulfillment & recovery termination gate with duplicate and loop bounding protections.
+
+### Verification
+- AC-1 to AC-12 Pre-patch test suite: PASS (12/12, 100%).
+- AC-4 4-way synchronization invariant: PASS.
+- AC-5 next-iteration execution by request_ready_nodes: PASS.
+- AC-6 fact persistence across recovery cycles: PASS.
+- AC-7 fulfillment re-evaluation on updated state: PASS.
+- AC-10 zero infinite loop bounded termination: PASS.
+- AC-11 zero duplicate requirement signature rejection: PASS.
+- AC-12 Binance Futures, Spot, Polymarket connectors regression: PASS.
+- Controlled E2E recovery test: PASS.
+- `python3 -m py_compile hermes_agent/orchestrator.py`: PASS.
+
+### Status
+CLOSED
+
+Ringkasan Perubahan
+Patch Layer A telah berhasil diterapkan secara terisolasi pada 
+hermes_agent/fact_checker.py
+ tanpa menyentuh Controller (orchestrator.py). Patch ini menyelesaikan defect eliminasi silent fakta Flat JSON dari model LLM sebelum masuk ke gate validasi dan Knowledge Graph.
+
+1. Guard Provenance-Aware pada Normalisasi
+Sebelum melakukan konversi flat key-value pairs ke format kanonikal bertingkat (nested dict), normalizer memvalidasi root_source terhadap valid_urls dari all_evidence. Jika root_source tidak valid atau tidak cocok dengan dokumen sumber:
+
+Nilai flat primitif dilarang dikonversi menjadi fakta (tidak ada blind conversion).
+Seluruh gate validasi lama (Provenance Guard, Example-Scope Gate, Numeric Fidelity Gate, Deduplication Counter, dan FactRanker) tetap dijalankan secara utuh tanpa ada bypass.
+2. Penjelasan Diskrepansi 14 Validated → 13 Ranked
+Dari 24 field mentah pada Obs 13:
+
+-2 metadata root (source_url, source_type) dikonsumsi untuk memperkaya atribut provenance.
+-8 field ditolak oleh _value_is_example_scoped karena berada di blok contoh response body dokumentasi.
+= 14 field lulus seluruh 4 filter validasi FactChecker.
+-1 field (base_url) diabaikan oleh FactRanker karena berakhiran _url yang terdaftar dalam METADATA_PATTERNS (
+fact_ranker.py:10
+).
+= 13 field berhasil diranking dan disimpan ke Knowledge Graph serta request_facts.
+
+## 2026-09-12 — Weather API Capability (Open-Meteo Integration)
+
+### Objective & Architecture
+Added official, read-only Weather API capability powered by Open-Meteo (`geocoding-api.open-meteo.com` and `api.open-meteo.com/v1/forecast`).
+Provides zero-API-key meteorological observations and target date forecasts to satisfy independent weather observation requirements (e.g. Polymarket weather prediction markets).
+
+### Components Implemented & Patched
+1. `aran_search/connectors/weather.py` [NEW]:
+   - Inherits `BaseConnector` contract with 24-hour disk cache.
+   - Detects `open-meteo.com`, `weather://`, `wttr.in`, `weather.com`, `accuweather.com` URLs.
+   - Geocodes location names to coordinates, administrative region, and timezone.
+   - Fetches current weather and daily forecasts (`temperature_2m_max`, `temperature_2m_min`, `precipitation_sum`, `rain_sum`).
+   - Extracts target date forecasts matching prediction dates.
+2. `aran_search/connectors/__init__.py` [MODIFY]:
+   - Exported `WeatherConnector`.
+3. `aran_search/searcher.py` [MODIFY]:
+   - Dispatched `WeatherConnector` in `fetch_url`.
+   - Implemented `_format_weather` highlighting `[WEATHER OFFICIAL API - OPEN-METEO]`, `[TARGET DATE FORECAST]` with `temperature_2m_max`, timezone, units, and daily forecast summary.
+4. `hermes_agent/skill_router.py` [MODIFY]:
+   - Added meteorological lexicon to `internet_terms` (`weather`, `cuaca`, `forecast`, `prakiraan`, `suhu`, `temperature`, `rain`, `hujan`).
+   - Added `"weather"` category route to `_agent_reach_route`.
+5. `hermes_agent/skill_executors.py` [MODIFY]:
+   - Implemented `weather_executor` supporting direct URLs and location query strings.
+6. `hermes_agent/orchestrator.py` [MODIFY]:
+   - Registered `"weather"` in `SkillBridge`.
+   - Added `_extract_weather_target` extracting location and target date from prediction market questions.
+   - Configured `_resolve_recovery_requirement` to emit recovery requirement targeting Open-Meteo URL with `capability="weather"`.
+   - Enhanced `process_node` to prioritize requirement-level `target` as hard target.
+7. `~/.agents/skills/weather/SKILL.md` [NEW]:
+   - Created semantic descriptor for SkillRouter discovery and intent matching without executable code.
+
+### Verification & Test Suite
+- `test_weather_connector_standalone.py`: PASS 100% (geocoding, target date extraction, cache hit, graceful error handling).
+- `test_searcher_weather_fetch.py`: PASS (clean formatting, explicit `temperature_2m_max`, units, and timezone).
+- `test_skill_router_weather.py`: PASS (SkillRouter discovered weather skill, matched queries, and routed to weather category).
+- `test_weather_regression_and_e2e.py`: PASS (4/4 tests: legacy connector detection intact, SkillBridge execution, recovery resolution, multi-city target extraction).
+- `test_full_e2e_weather_flow.py`: PASS (full pipeline: Polymarket fact -> evaluator MISSING -> controller recovery resolution -> WeatherConnector live fetch -> FactChecker extraction -> KnowledgeGraph ingestion -> node FOUND).
+- `py_compile` checks for all modified files: PASS 0 errors.
+
+### Status
+CLOSED
+
+
+## 2026-09-05 — FIX: URL extraction trailing delimiter
+
+### Defect
+Orchestrator `search_one()` reparsed the string returned by Aran Reach
+using `re.findall(r'(https?://[^\s\n]+)', result_text)`. Exa highlights
+can contain quoted example URLs inside content, causing the closing quote
+to be captured as part of the URL.
+
+Verified malformed runtime candidate:
+`https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd"`
+
+### Root Cause
+The malformed URL was produced during orchestrator URL extraction from the
+combined search-result string. Exa `ExaResult.url`, Google CSE/SearXNG raw
+URLs, SkillBridge, and agent-reach executor were verified not to introduce
+the trailing quote.
+
+### Fix
+Restricted both `result_text` URL extraction regex occurrences in
+`hermes_agent/orchestrator.py` to terminate on quote/bracket delimiters.
+
+### Verification
+- Exa direct result URLs: PASS, clean.
+- Google CSE/SearXNG raw URLs: PASS, clean.
+- Isolated URL extraction regression: PASS.
+- `python3 -m py_compile hermes_agent/orchestrator.py`: PASS.
+- Controlled Hermes runtime request: PASS.
+- Malformed `api.coingecko.com/...usd"` candidate: absent after patch.
+- Valid CoinGecko candidate/fetch path: PASS.
+- CoinGecko official connector invoked: PASS.
+- Official CoinGecko price/timestamp extracted as facts: PASS.
+- Semantic requirement gate: FULFILLED.
+- Research completeness: COMPLETE.
+- Synthesis received 3 request-local facts and 0 foreign facts.
+
+### Status
+CLOSED
+
+\n
+## 2026-09-05 — CoinGecko Official API Connector
+
+- Added `CoinGeckoConnector` under `aran_search/connectors/` for canonical CoinGecko coin URLs.
+- CoinGecko price acquisition now uses the official CoinGecko API instead of relying on the JS-heavy webpage.
+- Validated Bitcoin and Ethereum runtime fetches with USD price and `last_updated_at` timestamp.
+- Fixed error-path control flow: `coin_not_found` returned by the official API is now terminal and no longer falls through to Browser/Jina fallback.
+- Runtime regression passed for valid Bitcoin, valid Ethereum, and invalid coin URL.
+- `python3 -m py_compile aran_search/searcher.py` passed.
+- Browser human-verification path was not invoked for the invalid CoinGecko URL after the fix.
+
+## 2026-09-10
+
+### PATCH 8A — Requirement-scoped Fact Extraction
+
+DATE:
+2026-09-10
+
+FILE:
+hermes_agent/fact_checker.py
+
+PROBLEM:
+`extract_facts_batch()` menerima `checklist`, tetapi extraction prompt sebelumnya
+tidak menggunakan checklist sebagai research scope. Extractor bersifat terlalu
+umum dan berpotensi mengambil substantive facts yang tidak diperlukan oleh
+active requirement.
+
+HYPOTHESIS:
+Jika extraction prompt diberi research requirements dan explicit extraction
+scope, extractor akan lebih fokus pada facts yang diperlukan dan mengurangi
+unrelated facts serta token/payload overhead.
+
+EVIDENCE:
+Baseline harness menunjukkan requirement markers tidak masuk ke prompt:
+`btc_current_price`, `Current BTC price`, `timestamp`, dan
+`compare two sources` semuanya FALSE.
+
+Candidate scope harness menunjukkan seluruh requirement markers masuk ke prompt
+dan menghasilkan hanya required facts tanpa unrelated liquidity/market facts.
+
+PATCH:
+Menambahkan `RESEARCH REQUIREMENTS` dan `EXTRACTION SCOPE` ke prompt
+`extract_facts_batch()`, menggunakan checklist yang sudah diterima fungsi.
+Existing extraction rules tetap dipertahankan.
+
+TEST:
+`test_patch8_scope.py`
+Candidate scope harness.
+
+RESULT:
+PASS.
+Requirement scope masuk ke extraction prompt.
+Required facts tetap dapat diekstraksi.
+Unrelated liquidity/market facts = 0 pada controlled harness.
+
+STATUS:
+VERIFIED
+
+
+### PATCH 8B — Production Requirement Scope Propagation
+
+DATE:
+2026-09-10
+
+FILE:
+hermes_agent/orchestrator.py
+
+PROBLEM:
+Dua production callers `extract_facts_batch()` masih mengirim checklist generik:
+
+`{"field_id": "facts", "label": "All facts"}`
+
+Akibatnya PATCH 8A belum menerima requirement scope yang sebenarnya dari
+orchestrator.
+
+HYPOTHESIS:
+Jika caller mengirim `req_id` dan `topic + need` sebagai checklist, extraction
+scope akan mengikuti active research requirement secara nyata di production.
+
+EVIDENCE:
+Source audit menemukan dua caller production pada attachment path dan normal
+requirement path yang menggunakan `All facts`.
+
+Production controlled test setelah patch menunjukkan requirement-specific
+`req_id`, misalnya:
+
+`current Bitcoin price from CoinMarketCap [real-time BTC price data and timestamp]`
+
+Pada request sederhana:
+- evidence selected = 1
+- extracted facts = 1
+- synthesis facts_chars = 205
+
+Pada request yang secara eksplisit meminta minimal 2 sumber:
+- evidence_for_req = 2
+- extracted facts = 2
+- synthesis evidence_sources = 2
+- synthesis facts_chars = 611
+
+Ini menunjukkan extraction scope menjadi lebih efisien tanpa menghilangkan
+kemampuan memenuhi request multi-source ketika requirement memang memintanya.
+
+PATCH:
+Mengganti checklist generik pada dua production callers dengan:
+
+`field_id = req_id`
+`label = f"{topic}: {need}"`
+
+Tidak mengubah extraction logic, ranking, evaluator, atau completion logic.
+
+TEST:
+`python3 -m py_compile hermes_agent/orchestrator.py`
+Controlled production BTC research requests.
+Audit `/tmp/hermes-api.log`.
+
+RESULT:
+PASS.
+Tidak ada lagi `All facts` pada dua active extraction callers.
+Requirement-specific scope diteruskan ke FactChecker.
+Controlled production extraction menghasilkan payload yang lebih kecil.
+Multi-source request tetap menghasilkan dua evidence/two facts.
+
+STATUS:
+VERIFIED
+
+
+### Follow-up Audit — Deterministic Validation / Planner Scope
+
+DATE:
+2026-09-10
+
+FILE:
+hermes_agent/task_planner.py
+hermes_agent/orchestrator.py
+
+PROBLEM:
+Sudoku validation request memicu beberapa web research requirements dan
+multiple fetch/relevance-validation LLM calls, meskipun input sudah berisi
+papan Sudoku lengkap.
+
+EVIDENCE:
+Production log menunjukkan requirements:
+- `Sudoku rules for 3x3 subgrid uniqueness`
+- `Sudoku puzzle validity checking procedure`
+- `Duplicate digit detection in Sudoku subgrids`
+
+Search/fetch kemudian berjalan pada banyak URLs dan terdapat fetch timeout.
+Planner juga mengalami two `finish_reason=length` attempts sebelum menghasilkan
+usable plan.
+
+HYPOTHESIS:
+Planner atau post-planner completeness logic mungkin menghasilkan requirement
+yang redundant/overlapping untuk deterministic validation tasks.
+
+STATUS:
+OPEN
+
+NEXT:
+Audit apakah tiga Sudoku requirements berasal langsung dari TaskPlanner atau
+ditambahkan/diubah oleh CompletenessChecker sebelum membuat patch.
+
+Berikut changelog yang bisa langsung dipindahkan ke `CHANGELOG_HANDOFF.md`:
+
+```markdown
+## 2026-09-10 — PATCH 9A Embedded Structured User Data
+
+### Status
+- PATCH 9A: **DIAGNOSIS VERIFIED**
+- Production patch: **APPLIED**
+- Production syntax check: **PASS**
+- Deterministic harness: **7/7 PASS**
+- Runtime verification: **FAILED / OPEN**
+- Regression: **NOT YET VERIFIED**
+
+### Objective
+Preserve structured data embedded directly in the user's request as request-local evidence/facts, without:
+- treating the entire user instruction/goal as evidence;
+- requiring the data to arrive as an attachment;
+- persisting transient user-provided structured data into the persistent Knowledge Graph.
+
+### Production Changes
+`hermes_agent/orchestrator.py` was patched to:
+
+1. Extract an embedded Sudoku 9x9 grid from the current request.
+2. Represent the extracted grid as request-local user evidence:
+   - `source_type=user_input`
+   - `evidence_type=user_input`
+   - `doc_type=user_input`
+   - `url=user://request`
+   - `transient=True`
+3. Store the corresponding fact under:
+   - `input/user_sudoku_grid`
+4. Merge request-local input facts into:
+   - `all_facts`
+5. Exclude `user://request` facts from the persistent KG learning path.
+6. Keep transient input facts available to semantic fulfillment/synthesis.
+
+### Additional Extractor Correction
+The first production extractor implementation required a strict triple-backtick fence:
+
+```python
+if stripped.startswith("```"):
+```
+
+Runtime testing showed that the actual request representation reaching `research(goal)` used single-backtick formatting wrapped by markdown formatting, e.g.:
+
+```text
+**`
+5 3 . | . 7 . | . . .
+...
+`**
+```
+
+Therefore the extractor did not enter its fence state and returned `None`.
+
+This explains the observed runtime result:
+
+```text
+[AUDIT SYNTHESIS] total_all_facts=16 own_request_facts=16
+```
+
+while semantic validation reported that the actual Sudoku configuration was missing.
+
+### Evidence Chain
+Confirmed:
+
+```text
+RAW REQUEST
+    ↓
+USER_MSG
+    ↓
+research(goal)
+```
+
+The Sudoku grid is present in `USER_MSG` and therefore the API/request boundary is not the loss point.
+
+The loss occurs at the embedded structured-data extraction stage because the extractor's fence assumption does not match the runtime representation.
+
+### Verification Performed
+
+Deterministic PATCH 9A harness:
+
+```text
+VERIFY complete: 7/7 deterministic PATCH 9A contracts PASS
+```
+
+Production syntax:
+
+```text
+py_compile: PASS
+```
+
+Controlled runtime request:
+
+- `USER_MSG` contained the complete Sudoku grid.
+- Attachment evidence remained `0`, as expected because the grid was embedded in the user message.
+- `total_all_facts=16`
+- Semantic validation still reported the actual Sudoku configuration as missing.
+- No `user://request` / `input/user_sudoku_grid` markers appeared in runtime logs.
+
+### Root Cause Confirmed
+
+The production extractor was too strict about Markdown fence syntax.
+
+Runtime-normalized user content used single backticks, while the extractor only recognized triple backticks.
+
+Result:
+
+```text
+embedded Sudoku grid
+        ↓
+extractor returns None
+        ↓
+request_input_facts remains empty
+        ↓
+all_facts contains only normal request facts
+        ↓
+semantic validation cannot see the Sudoku configuration
+```
+
+### Current Open Issue
+
+The exact minimal production correction for accepting the runtime-normalized single-backtick representation has **not yet been applied**.
+
+Before applying it, a dedicated unit/reproduction test should be corrected to import the actual orchestrator structure. The initial test attempt incorrectly assumed an `Orchestrator` class exists and failed with:
+
+```text
+ImportError:
+cannot import name 'Orchestrator'
+```
+
+No production code was changed by that failed test.
+
+### Next Step
+
+1. Inspect the actual class/module structure around `_extract_embedded_sudoku_grid`.
+2. Build a direct extractor reproduction test against the actual implementation.
+3. Verify the runtime-format case fails before patch.
+4. Apply the smallest safe extractor correction.
+5. Run `py_compile`.
+6. Run deterministic harness/regression.
+7. Repeat one controlled Sudoku request.
+8. Verify:
+   - `input/user_sudoku_grid` exists;
+   - grid reaches `all_facts`;
+   - semantic validation can see the grid;
+   - `user://request` does not enter persistent KG;
+   - normal research behavior remains intact.
+
+### Important
+Do not classify PATCH 9A as **FIXED** until controlled runtime verification and regression both pass.
+
+---
+
+## Separate Open Issue — PATCH 9B
+
+Planner over-decomposition remains a separate issue.
+
+It is **not included in PATCH 9A** and must not be patched as part of the embedded-user-data correction.
+```
+
+
+## 2026-09-11 — Binance Futures Connector
+
+DATE:
+2026-09-11
+
+FILE:
+aran_search/connectors/binance_futures.py
+aran_search/searcher.py
+
+PROBLEM:
+Production Binance BTCUSDT research menemukan URL resmi
+https://www.binance.com/en/futures/BTCUSDT, tetapi Hermes hanya memiliki
+Binance Spot connector yang menggunakan /api/v3/ticker/24hr.
+URL Futures tidak dapat diproses melalui connector Spot tanpa mencampur
+semantik Spot dan Futures.
+
+HYPOTHESIS:
+Diperlukan connector read-only Binance Futures terpisah yang menggunakan
+official Binance USDⓈ-M Futures API dan diintegrasikan sebelum Binance Spot
+connector.
+
+EVIDENCE:
+Production log menunjukkan URL /futures/BTCUSDT sebelumnya masuk fallback
+browser/Jina. Audit source membuktikan BinanceConnector hanya mengenali
+/trade/PAIR dan menggunakan /api/v3/ticker/24hr.
+Official Futures endpoint fapi.binance.com/fapi/v1/ticker/24hr berhasil
+mengembalikan HTTP 200 untuk BTCUSDT.
+
+PATCH:
+Menambahkan BinanceFuturesConnector dengan:
+- strict /futures/<SYMBOL> URL detection
+- symbol extraction
+- official USDⓈ-M Futures /fapi/v1/ticker/24hr
+- read-only market data
+- timestamp normalization
+- structured error handling
+- connector integration di searcher.py
+Binance Spot connector tidak diubah.
+
+TEST:
+- Binance Futures standalone connector test: PASS
+- Binance Spot + Futures regression: PASS
+- Spot/Futures isolation: PASS
+- py_compile binance.py: PASS
+- py_compile binance_futures.py: PASS
+- py_compile searcher.py: PASS
+- Production BTCUSDT request: PASS
+- Evidence Gate: ACCEPT
+- Semantic requirement: FULFILLED
+- own_request_facts=2
+- foreign_facts=0
+
+RESULT:
+Hermes berhasil mengambil BTCUSDT Futures melalui official Binance Futures
+API, meneruskan evidence dan facts ke pipeline, mempertahankan provenance
+ke URL Binance Futures, dan memenuhi semantic requirement.
+
+STATUS:
+VERIFIED
+
+## 2026-09-12
+
+### Follow-up Audit — Planner Routing / Polymarket Date Anchor
+
+DATE:
+2026-09-12
+
+FILE:
+hermes_agent/task_planner.py
+hermes_agent/orchestrator.py
+
+PROBLEM:
+Production research untuk market cuaca Polymarket Manila pada 12 September
+2026 masih menghasilkan research INCOMPLETE.
+
+HYPOTHESIS:
+Round-robin model routing pada Planner dapat menggunakan model berbeda antara
+attempt/retry sehingga hasil planning tidak deterministic. Hal ini harus
+distabilkan sebelum efektivitas Entity/Date Anchor dapat dinilai secara valid.
+
+EVIDENCE:
+Production trace sebelumnya menunjukkan retry Planner dapat berpindah model
+antar attempt.
+
+Test Polymarket menunjukkan requirement utama dapat menemukan kandidat market,
+tetapi evidence yang akhirnya diproses berisi market Manila untuk tanggal yang
+salah (11/13 September), sehingga Evidence Gate menolak evidence tersebut.
+Requirement turunan kemudian ter-block karena dependency requirement utama
+berstatus partial.
+
+Fetch log menunjukkan Evidence Gate secara benar menolak evidence yang tidak
+sesuai tanggal 12 September.
+
+PATCH:
+Planner token budget sebelumnya telah dinaikkan menjadi [1536, 3072].
+
+Fetch result limit `[:2]` sebelumnya telah dihapus.
+
+Entity/Date Anchor patch telah diterapkan untuk test, tetapi belum dinyatakan
+VERIFIED.
+
+TEST:
+Production test market cuaca Polymarket Manila, 12 September 2026.
+
+RESULT:
+Planner token budget: PASS pada test sebelumnya.
+Fetch `[:2]` removal: PASS pada test sebelumnya.
+Anti-hallucination / completeness guard: PASS.
+Polymarket market-specific evidence: masih INCOMPLETE pada test ini.
+Probability, volume, liquidity, spread, dan resolution source market-specific
+belum berhasil masuk sebagai evidence yang cukup pada run ini.
+
+NEXT STEP:
+Stabilkan routing Planner agar satu logical planning request menggunakan model
+yang sama pada retry. Setelah itu ulangi test yang sama sebelum melakukan patch
+berikutnya.
+
+STATUS:
+OPEN
+
+## 2026-09-12 — PATCH: Direct Conversation Context
+
+### Root Cause
+`hermes_agent/orchestrator.py` pada direct path menggunakan:
+
+    direct_query = goal
+
+sehingga `context` yang sudah berhasil dibentuk oleh `api/main.py` dan diteruskan ke `HermesAgent.research()` tidak ikut dikirim ke LLM.
+
+Akibatnya follow-up query seperti:
+
+    bagaimana denganprediksi mu yes or no
+
+diterima LLM tanpa percakapan sebelumnya.
+
+### Patch
+Direct path sekarang menyisipkan:
+
+    CONVERSATION CONTEXT:
+    <context>
+
+    USER QUESTION:
+    <goal>
+
+System prompt juga secara eksplisit menginstruksikan LLM memperlakukan `CONVERSATION CONTEXT` sebagai diskusi sebelumnya.
+
+### Backup
+    hermes_agent/orchestrator.bak.direct_context_20260912_042341.py
+
+### Verification
+- Source patch: PASS
+- Backup: PASS
+- `py_compile`: PASS
+- `git diff`: PASS
+- Pre-patch Langfuse payload: context tidak ada
+- Post-patch Langfuse payload: context ~2,800 chars
+- Runtime follow-up: PASS
+- LLM berhasil menggunakan context sebelumnya
+- Polymarket Yes: 1.05%
+- Polymarket No: 98.95%
+
+### Status
+VERIFIED PASS
+
+### Scope
+Tidak mengubah Planner, Searcher, SemanticRouter, Analyzer, Evidence Pipeline, atau perubahan source lain yang sudah ada.
+
+# CHANGELOG
+
+## 2026-09-12
+
+### Binance Futures — PATCH 1: Funding Rate Metadata
+Status: VERIFIED PASS
+
+- Added Binance Futures `premiumIndex` integration.
+- Added metadata:
+  - last_funding_rate
+  - last_funding_rate_percent
+  - next_funding_time
+  - next_funding_time_utc
+  - mark_price
+  - index_price
+- `premiumIndex` failure is non-blocking; ticker data remains available.
+- Verified live BTCUSDT response.
+- Verified invalid-symbol handling (`-1121`).
+- Verified cache persistence.
+- Verified Spot/Futures isolation.
+- `py_compile`: PASS.
+- Backup:
+  `aran_search/connectors/binance_futures.bak.funding_rate_20260912_121420.py`
+
+### Binance Futures — PATCH 2: Evidence Formatter
+Status: VERIFIED PASS
+
+- Extended `searcher.py` Binance Futures evidence formatter.
+- Evidence now exposes:
+  - Mark price
+  - Index price
+  - Funding rate
+  - Next funding time
+- Existing ticker fields preserved.
+- Verified live Binance Futures evidence.
+- Verified Spot isolation.
+- `py_compile`: PASS.
+- Backup:
+  `aran_search/searcher.bak.futures_formatter_20260912_122306.py`
+
+### Research Completeness / Orchestrator Audit
+Status: AUDITED — NO PATCH
+
+- Audited `CompletenessChecker`.
+- Confirmed it operates as a pre-run plan reviewer, not a runtime completeness controller.
+- Audited `_evaluate_requirement_fulfillment()`.
+- Confirmed semantic fulfillment is evaluated after the current execution loop.
+- Confirmed `research_incomplete` is currently converted into synthesis instructions.
+- Confirmed there is no verified feedback path:
+  `INCOMPLETE → targeted requirement → capability execution → re-evaluation`.
+- Three Langfuse traces support the same structural gap:
+  - incomplete time-series prediction
+  - Polymarket refusal/direct path
+  - Polymarket weather research stopping after market discovery
+- Current architecture therefore behaves as a static/batch research pipeline rather than a dynamic continuation controller.
+
+### Controller Architecture Audit
+Status: NEXT AUDIT — NOT PATCHED
+
+Before implementing a controller loop, the following must be audited:
+
+- `requirement_map` lifecycle
+- requirement/node creation
+- node status transitions
+- `request_ready_nodes()`
+- `iterations_completed`
+- loop termination conditions
+- persistence of `all_facts` and evidence across iterations
+- whether new requirements can safely be injected into the active graph
+- existing retry/error mechanisms
+- whether continuation can be implemented without re-running the entire TaskPlanner
+
+HYPOTHESIS:
+Existing graph/state infrastructure may support dynamic requirement injection.
+
+EVIDENCE:
+Not yet sufficient. The termination gap is proven, but safe runtime graph injection has not yet been proven.
+
+RULE:
+No controller patch until the state/graph lifecycle audit proves a safe injection point.
+
+## 2026-09-13 — Dynamic Model Listing in api/main.py
+
+DATE:
+2026-09-13
+
+FILE:
+api/main.py
+
+PROBLEM:
+Endpoint /v1/models dan /models di api/main.py menggunakan list statis hardcoded yang hanya memuat deepseek-chat dan 9router. Penambahan model atau provider baru di .env (misalnya 9routerpc atau provider lain) tidak muncul di dropdown model Open WebUI.
+
+HYPOTHESIS:
+Mengubah list_models() agar membaca dinamis dari llm.providers.keys() akan membuat setiap provider yang terkonfigurasi di .env otomatis langsung muncul di Open WebUI tanpa perlu mengedit kode setiap kali menambah provider/model.
+
+EVIDENCE:
+Audit source pada llm_analyzer/analyzer.py:29-116 membuktikan LLMAnalyzer._load_providers() sudah dinamis memuat semua prefix LLM_PROVIDER_* dari .env.
+Namun pada api/main.py:121-130, list_models() mengembalikan data statis.
+PATCH:
+Memperbarui list_models() di api/main.py:
+model_ids = sorted(llm.providers.keys()) if hasattr(llm, "providers") and llm.providers else ["deepseek-chat", "9router"]
+Mengembalikan {"id": model_id, "object": "model"} untuk setiap model_id.
+Diterapkan via Python heredoc dengan timestamped backup otomatis dan assertion exact block match.
+
+TEST:
+- py_compile api/main.py: PASS
+- Live test provider resolution dari .env (deepseek-chat, 9router, 9routerpc): PASS
+RESULT:
+Endpoint /v1/models kini otomatis merefleksikan seluruh model/provider yang aktif di .env.
+STATUS:
+PATCHED
