@@ -11,7 +11,13 @@ from aran_search.searcher import AgentReachSearcher
 from aran_search.evidence import DocumentIntelligence
 from hermes_agent.task_planner import TaskPlanner
 from hermes_agent.completeness_checker import CompletenessChecker
-from hermes_agent.knowledge_graph import KnowledgeGraph
+from hermes_agent.knowledge_graph import KnowledgeGraph, NodeExecutionState
+from hermes_agent.capability import (
+    Capability,
+    CapabilityRegistry,
+    CapabilityResolver,
+    CapabilityScheduler,
+)
 from hermes_agent.semantic_router import SemanticRouter
 from hermes_agent.skill_router import SkillRouter
 from hermes_agent.skill_bridge import SkillBridge
@@ -58,6 +64,8 @@ class HermesAgent:
         self.task_planner = TaskPlanner(llm_analyzer)
         self.router = SemanticRouter()
         self.skill_router = SkillRouter()
+        self.capability_registry = CapabilityRegistry()
+        self.capability_scheduler = CapabilityScheduler(self.capability_registry)
         self.completeness = CompletenessChecker(llm_analyzer)
         self.strategy = SearchStrategy(llm_analyzer)
         self.searcher = AgentReachSearcher(llm_analyzer)
@@ -154,7 +162,7 @@ RULES:
         total = sum(1 for n in nodes.values() if n.get("type") != "project")
         return (found / total * 100) if total > 0 else 0
 
-    def _fetch_url_parallel(self, urls: list, seen: set, query: str) -> list:
+    def _fetch_url_parallel(self, urls: list, seen: set, query: str, errors: dict = None) -> list:
         results = []
         def fetch_one(url):
             if url in seen: return None
@@ -164,6 +172,9 @@ RULES:
             )
             if raw and raw.startswith("Error fetch"):
                 logger.info("[AUDIT FETCH ERROR] url=%s raw=%r", url, raw[:300])
+                if errors is not None:
+                    errors[url] = raw
+                return None
             if raw and len(raw) > 50:
                 processed = self.docintel.process(raw, query, url=url)
 
@@ -220,6 +231,9 @@ RULES:
                     processed.get("sections_kept"), processed.get("char_before"), processed.get("char_after"),
                 )
                 return {"url": url, "content": content, "doc_type": processed["doc_type"]}
+            else:
+                if errors is not None and url not in errors:
+                    errors[url] = "EMPTY_CONTENT" if raw is not None else "NO_RESPONSE"
             return None
         with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
             futures = {
@@ -748,47 +762,6 @@ Return ONLY valid JSON:
             "allow_social": any(term in text for term in social_terms),
         }
 
-    @staticmethod
-    def _extract_embedded_sudoku_grid(goal: str) -> str | None:
-        """Return only a strict 9x9 Sudoku grid from an explicit fenced block."""
-        if not isinstance(goal, str) or "sudoku" not in goal.lower():
-            return None
-
-        allowed_cells = set("1234567890.")
-        in_fence = False
-        rows = []
-
-        for line in goal.splitlines():
-            stripped = line.strip()
-
-            if stripped.startswith("```"):
-                if in_fence:
-                    if len(rows) == 9:
-                        return "\n".join(rows)
-                    rows = []
-                    in_fence = False
-                else:
-                    in_fence = True
-                    rows = []
-                continue
-
-            if not in_fence:
-                continue
-
-            compact = "".join(ch for ch in line.strip() if ch not in " \t|")
-            if len(compact) == 9 and all(ch in allowed_cells for ch in compact):
-                rows.append(compact)
-                if len(rows) > 9:
-                    rows = []
-                continue
-
-            if stripped and set(stripped) <= set("-|+ \t"):
-                continue
-
-            rows = []
-
-        return None
-
     def research(self, goal: str, context: str = "", attachments: list | None = None) -> dict:
         profiler = TokenProfiler()
         req_id = init_request_id()
@@ -836,9 +809,6 @@ Return ONLY valid JSON:
         # Persistent KG tetap menyimpan historical facts, tetapi synthesis
         # hanya boleh memakai facts yang dihasilkan pada research run ini.
         request_facts = {}
-        # PATCH 9A: input/ facts are request-local and cannot satisfy the
-        # req_id/ predicate in request_requirement_complete().
-        request_input_facts = {}
         request_facts_lock = threading.Lock()
         semantic_completion_cache = {}
 
@@ -972,31 +942,6 @@ Return ONLY valid JSON:
 
             return result["content"]
 
-
-        # PATCH 9A: retain only a canonical grid, never the whole goal.
-        # It is intentionally excluded from the attachment early gate, whose
-        # successful path can skip web research.
-        embedded_user_evidence = []
-        embedded_sudoku_grid = self._extract_embedded_sudoku_grid(goal)
-        if embedded_sudoku_grid:
-            embedded_user_evidence.append({
-                "content": embedded_sudoku_grid,
-                "source_type": "user_input",
-                "evidence_type": "user_input",
-                "doc_type": "user_input",
-                "url": "user://request",
-                "transient": True,
-            })
-            request_input_facts["input/user_sudoku_grid"] = {
-                "value": embedded_sudoku_grid,
-                "source": "user://request",
-                "source_type": "user_input",
-            }
-            logger.info(
-                "[AUDIT EMBEDDED INPUT] req_id=%s type=sudoku_grid chars=%d",
-                req_id,
-                len(embedded_sudoku_grid),
-            )
 
         # KnowledgeGraph is research-only. Direct requests must not acquire
         # the global KG lock.
@@ -1264,7 +1209,7 @@ Return ONLY valid JSON:
 
             if not ready:
                 # CONTROLLER TERMINATION & RECOVERY GATE
-                current_facts = {**request_facts, **request_input_facts}
+                current_facts = dict(request_facts)
                 semantic_topic = plan.get("goal", goal)
                 semantic_need = "research goal fulfillment"
                 fulfilled, reason, missing = self._evaluate_requirement_fulfillment(
@@ -1329,9 +1274,9 @@ Return ONLY valid JSON:
                 req_id = node_info["topic"]
                 retries = retry_count.get(req_id, 0)
                 if retries >= self.MAX_RETRIES:
-                    kg.update_status(req_id, "failed")
+                    kg.update_status(req_id, NodeExecutionState.FAILED)
                     return 0
-                kg.update_status(req_id, "searching")
+                kg.update_status(req_id, NodeExecutionState.SEARCHING)
                 kg.increment_search(req_id)
                 retry_count[req_id] = retries + 1
                 k = requirement_map.get(req_id, {"topic": req_id, "need": "documentation"})
@@ -1455,27 +1400,30 @@ Return ONLY valid JSON:
                             req_id,
                         )
 
-                # Research always requires a search capability.
-                # Resolve the skill before applying the fallback.
-                selected_skill = self.skill_router.select(topic)
+                # Fase 3: Capability-Aware Scheduler
+                # Match requirement (topic + need) -> capability -> compatible provider
+                scheduled = self.capability_scheduler.schedule(topic, need)
 
-                # Semantic skill router may return None for a valid research topic.
-                # Fall back to the already-registered agent-reach executor.
-                if selected_skill is None:
-                    selected_skill = {
-                        "name": "agent-reach",
-                        "description": "Agent Reach internet capability router",
-                        "category": "search",
-                    }
-                    logger.info(
-                        "[skill-router] no match; research fallback=agent-reach topic=%s",
+                if scheduled is None:
+                    req_cap = CapabilityResolver.resolve(topic, need)
+                    logger.warning(
+                        "[AUDIT CAPABILITY MISMATCH] req_id=%s topic=%s need=%s "
+                        "required_capability=%s status=BLOCKED no_compatible_provider",
+                        req_id,
                         topic,
+                        need,
+                        req_cap,
                     )
+                    kg.update_status(req_id, NodeExecutionState.BLOCKED)
+                    return 0
+
+                selected_skill = scheduled
 
                 logger.info(
-                    "[AUDIT SKILL SELECT] req_id=%s topic=%s selected=%s",
+                    "[AUDIT SKILL SELECT] req_id=%s topic=%s need=%s selected=%s",
                     req_id,
                     topic,
+                    need,
                     selected_skill,
                 )
 
@@ -1705,6 +1653,7 @@ Return ONLY valid JSON:
                     and u not in request_fetch_cache
                 ]
 
+                fetch_errors = {}
                 if new_urls:
                     logger.info(
                         "[AUDIT FETCH NEW] req_id=%s topic=%s urls=%s",
@@ -1717,6 +1666,7 @@ Return ONLY valid JSON:
                         new_urls,
                         set(),
                         f"{topic} {need}",
+                        errors=fetch_errors,
                     )
 
                     for fetched in fetched_results:
@@ -1787,24 +1737,6 @@ Return ONLY valid JSON:
                             topic,
                             url,
                         )
-
-                # PATCH 9A: append after normal fetch, before the existing
-                # source-policy and relevance gates. Require actual web
-                # evidence so an embedded grid cannot replace web research.
-                has_web_evidence = any(
-                    str(e.get("url", "")).startswith(("http://", "https://"))
-                    for e in evidence_for_req
-                )
-                if has_web_evidence and embedded_user_evidence:
-                    for evidence in embedded_user_evidence:
-                        evidence_copy = {**evidence, "req_id": req_id}
-                        evidence_for_req.append(evidence_copy)
-                        all_evidence.append(evidence_copy)
-                    logger.info(
-                        "[AUDIT EMBEDDED INPUT] req_id=%s decision=APPEND_AFTER_FETCH documents=%d",
-                        req_id,
-                        len(embedded_user_evidence),
-                    )
 
                 latency.stop("fetch")
 
@@ -1963,22 +1895,6 @@ Return ONLY valid JSON:
                     # Jangan dipotong di level node.
                     ranked = dict(ranked.items())
 
-                    # PATCH 9A: user input can reach extraction but cannot be
-                    # persisted or satisfy a req_id/ requirement completion.
-                    persistent_ranked = {
-                        field: fact
-                        for field, fact in ranked.items()
-                        if isinstance(fact, dict)
-                        and str(fact.get("source", "")) != "user://request"
-                    }
-                    logger.info(
-                        "[AUDIT EMBEDDED INPUT] req_id=%s ranked=%d persistent=%d transient=%d",
-                        req_id,
-                        len(ranked),
-                        len(persistent_ranked),
-                        len(ranked) - len(persistent_ranked),
-                    )
-
                     logger.info(
                         "[AUDIT RANKED FACTS] req_id=%s topic=%s count=%d fields=%s",
                         req_id,
@@ -2031,28 +1947,69 @@ Return ONLY valid JSON:
                         },
                     )
 
-                    if (
-                        eval_result["coverage_pct"] >= self.MIN_COVERAGE
-                        and persistent_ranked
-                    ):
-                        kg.learn(req_id, persistent_ranked, plan)
+                    if eval_result["coverage_pct"] >= self.MIN_COVERAGE:
+                        kg.learn(req_id, ranked, plan)
 
-                        # Only web/non-transient facts may satisfy the
-                        # requirement or enter persistent KG. The canonical
-                        # grid remains under request_input_facts.
+                        # Simpan hanya facts hasil extraction run ini.
+                        # Historical facts di persistent KG tidak masuk
+                        # ke synthesis.
                         with request_facts_lock:
-                            for field, fact in persistent_ranked.items():
-                                request_facts[f"{req_id}/{field}"] = {
-                                    "value": fact.get("value"),
-                                    "source": fact.get("source", "unknown"),
-                                    "source_type": fact.get("source_type", "other"),
-                                }
+                            for field, fact in ranked.items():
+                                if isinstance(fact, dict):
+                                    request_facts[f"{req_id}/{field}"] = {
+                                        "value": fact.get("value"),
+                                        "source": fact.get("source", "unknown"),
+                                        "source_type": fact.get("source_type", "other"),
+                                    }
 
-                        kg.update_status(req_id, "found")
+                        kg.update_status(req_id, NodeExecutionState.FOUND)
                     else:
-                        kg.update_status(req_id, "partial")
+                        kg.update_status(req_id, NodeExecutionState.PARTIAL)
 
                     return 1
+
+                # -----------------------------------------------------------------
+                # P5: Explicit failure state when evidence_for_req is empty.
+                # Evict dangling 'searching' state based on actual fetch conditions:
+                # -----------------------------------------------------------------
+                if not all_urls:
+                    logger.warning(
+                        "[AUDIT REQ FAILURE] req_id=%s topic=%s reason=no_urls status=empty_content",
+                        req_id,
+                        topic,
+                    )
+                    kg.update_status(req_id, NodeExecutionState.EMPTY_CONTENT)
+                else:
+                    err_texts = " ".join(str(v).lower() for v in fetch_errors.values())
+                    if any(tok in err_texts for tok in ("timeout", "timed out", "deadline", "timedout")):
+                        logger.warning(
+                            "[AUDIT REQ FAILURE] req_id=%s topic=%s reason=fetch_timeout status=timeout",
+                            req_id,
+                            topic,
+                        )
+                        kg.update_status(req_id, NodeExecutionState.TIMEOUT)
+                    elif any(tok in err_texts for tok in ("401", "403", "unauthorized", "forbidden", "auth")):
+                        logger.warning(
+                            "[AUDIT REQ FAILURE] req_id=%s topic=%s reason=fetch_auth status=auth_failure",
+                            req_id,
+                            topic,
+                        )
+                        kg.update_status(req_id, NodeExecutionState.AUTH_FAILURE)
+                    elif all(v in ("EMPTY_CONTENT", "NO_RESPONSE") or not str(v).startswith("Error fetch") for v in fetch_errors.values()) and fetch_errors:
+                        logger.warning(
+                            "[AUDIT REQ FAILURE] req_id=%s topic=%s reason=empty_fetch status=empty_content",
+                            req_id,
+                            topic,
+                        )
+                        kg.update_status(req_id, NodeExecutionState.EMPTY_CONTENT)
+                    else:
+                        logger.warning(
+                            "[AUDIT REQ FAILURE] req_id=%s topic=%s reason=fetch_failed status=failed errors=%s",
+                            req_id,
+                            topic,
+                            list(fetch_errors.values())[:3],
+                        )
+                        kg.update_status(req_id, NodeExecutionState.FAILED)
 
                 return 0
 
@@ -2142,9 +2099,7 @@ Return ONLY valid JSON:
         # 4. Build answer
         # Synthesis hanya memakai facts yang dibuat selama research run ini.
         # Persistent KnowledgeGraph tetap menyimpan historical facts.
-        # PATCH 9A: semantic fulfillment and synthesis see the
-        # canonical grid, but it remains outside persistent KG and req_id/.
-        all_facts = {**request_facts, **request_input_facts}
+        all_facts = dict(request_facts)
 
         _this_request_nodes = set(requirement_map.keys()) | {goal}
         _own = sum(

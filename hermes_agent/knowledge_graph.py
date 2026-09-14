@@ -7,6 +7,29 @@ from datetime import datetime
 from collections import defaultdict
 
 
+class NodeExecutionState:
+    """First-class execution states for Aran research nodes."""
+    PLANNED = "planned"
+    PENDING = "planned"  # Legacy mapping: pending mapped to planned
+    READY = "ready"
+    SEARCHING = "searching"
+    FOUND = "found"
+    VERIFIED = "verified"
+    PARTIAL = "partial"
+    TIMEOUT = "timeout"
+    EMPTY_CONTENT = "empty_content"
+    INVALID_OUTPUT = "invalid_output"
+    AUTH_FAILURE = "auth_failure"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+    SUCCESS_STATES = {FOUND, VERIFIED}
+    FAILURE_STATES = {
+        TIMEOUT, EMPTY_CONTENT, INVALID_OUTPUT,
+        AUTH_FAILURE, BLOCKED, FAILED,
+    }
+
+
 class KnowledgeGraph:
 
     GRAPH_FILE = os.path.expanduser("~/research-assistant/data/knowledge_graph.json")
@@ -18,8 +41,10 @@ class KnowledgeGraph:
     }
 
     VALID_STATUSES = {
-        "unknown", "planned", "searching", "found", "verified",
-        "partial", "failed", "conflicted",
+        "unknown", "planned", "searching", "ready",
+        "found", "verified", "partial", "conflicted",
+        "timeout", "empty_content", "invalid_output",
+        "auth_failure", "blocked", "failed",
     }
 
     NODE_TYPES = {
@@ -188,7 +213,7 @@ class KnowledgeGraph:
             if rel in ("requires", "depends_on"):
                 for t in targets:
                     st = self.graph["nodes"].get(t, {}).get("status", "unknown")
-                    if st not in ("found", "verified"):
+                    if st not in NodeExecutionState.SUCCESS_STATES:
                         gaps.append({"topic": t, "relation": rel, "status": st})
         return gaps
 
@@ -205,7 +230,7 @@ class KnowledgeGraph:
             for rel, targets in tn.get("relations", {}).items():
                 if rel in ("requires", "depends_on"):
                     for d in targets:
-                        if self.graph["nodes"].get(d, {}).get("status") not in ("found", "verified"):
+                        if self.graph["nodes"].get(d, {}).get("status") not in NodeExecutionState.SUCCESS_STATES:
                             all_met = False
             if all_met:
                 ready.append(g)
@@ -224,7 +249,7 @@ class KnowledgeGraph:
                 for rel, targets in tn.get("relations", {}).items():
                     if rel in ("requires", "depends_on"):
                         for d in targets:
-                            if self.graph["nodes"].get(d, {}).get("status") not in ("found", "verified"):
+                            if self.graph["nodes"].get(d, {}).get("status") not in NodeExecutionState.SUCCESS_STATES:
                                 blockers.append(d)
                 blocked.append({"topic": t, "status": g["status"], "blocked_by": blockers})
         return blocked
