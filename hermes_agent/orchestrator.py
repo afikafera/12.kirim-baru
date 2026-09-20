@@ -11,6 +11,7 @@ from aran_search.searcher import AgentReachSearcher
 from aran_search.evidence import DocumentIntelligence
 from hermes_agent.task_planner import TaskPlanner
 from hermes_agent.completeness_checker import CompletenessChecker
+from hermes_agent.plan_validator import PlannerContractValidator
 from hermes_agent.knowledge_graph import KnowledgeGraph, NodeExecutionState
 from hermes_agent.capability import (
     Capability,
@@ -27,11 +28,22 @@ from hermes_agent.skill_executors import (
     weather_executor,
 )
 from hermes_agent.search_strategy import SearchStrategy
-from hermes_agent.fact_checker import FactChecker
+from hermes_agent.fact_checker import FactChecker, extract_json
+from hermes_agent.llm_output_contract import llm_output_failure
 from hermes_agent.fact_ranker import FactRanker
 from hermes_agent.token_profiler import TokenProfiler
 from hermes_agent.latency_profiler import LatencyProfiler
 from hermes_agent.user_memory import UserMemory
+from hermes_agent.manifest_builder import ManifestBuilder
+from hermes_agent.section_scheduler import SectionScheduler
+from hermes_agent.section_store import SectionStore
+from hermes_agent.section_worker import SectionWorker
+from hermes_agent.coverage_evaluator import CoverageEvaluator
+from hermes_agent.outcome_classifier import OutcomeClassifier
+from hermes_agent.continuation_policy import ContinuationPolicy
+from hermes_agent.continuation_engine import ContinuationEngine
+from hermes_agent.output_aggregator import OutputAggregator
+from hermes_agent.output_manifest import SectionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +113,16 @@ class HermesAgent:
         self.ranker = FactRanker()
         self._strategy_cache = {}
         self._validation_cache = {}
+
+        # Output Scaling components.
+        # Mutable per-request state (scheduler/store) is created
+        # inside research() to prevent cross-request state leakage.
+        self.manifest_builder = ManifestBuilder()
+        self.output_aggregator = OutputAggregator()
+        self.outcome_classifier = OutcomeClassifier()
+        self.continuation_policy = ContinuationPolicy()
+        self.section_worker = SectionWorker(self.llm)
+        self.coverage_evaluator = CoverageEvaluator(self.llm)
 
     def _make_requirement_id(self, topic: str, need: str) -> str:
         return f"{topic} [{need}]"
@@ -691,32 +713,36 @@ Return ONLY valid JSON:
                     temperature=0.0,
                 )
 
-                raw = result.get("content", "").strip()
+                # Type & contract normalization:
+                content = result.get("content") if isinstance(result, dict) else None
 
-                import json
                 parsed = None
+                if isinstance(content, dict):
+                    parsed = content
+                elif isinstance(content, list):
+                    parsed = content[0] if content and isinstance(content[0], dict) else None
+                elif isinstance(content, str):
+                    raw = content.strip()
+                    if raw:
+                        parsed_candidate = extract_json(raw)
+                        if isinstance(parsed_candidate, dict):
+                            parsed = parsed_candidate
+                        elif isinstance(parsed_candidate, list) and parsed_candidate and isinstance(parsed_candidate[0], dict):
+                            parsed = parsed_candidate[0]
 
-                try:
-                    parsed = json.loads(raw)
-                except Exception:
-                    # Tolerate a JSON object embedded in a response.
-                    start = raw.find("{")
-                    end = raw.rfind("}")
-                    if start >= 0 and end > start:
-                        try:
-                            parsed = json.loads(raw[start:end + 1])
-                        except Exception:
-                            parsed = None
-
-                relevant = (
-                    isinstance(parsed, dict)
-                    and parsed.get("relevant") is True
-                )
-                reason = (
-                    parsed.get("reason", "no reason")
-                    if isinstance(parsed, dict)
-                    else "invalid validator response"
-                )
+                if isinstance(parsed, dict) and isinstance(parsed.get("relevant"), bool):
+                    relevant = parsed["relevant"]
+                    reason = str(parsed.get("reason") or ("accepted" if relevant else "rejected"))
+                elif isinstance(parsed, dict):
+                    relevant = False
+                    reason = "validator_contract_failure:non_boolean_relevant"
+                else:
+                    contract_fail = llm_output_failure(result)
+                    relevant = False
+                    if contract_fail:
+                        reason = f"validator_contract_failure:{contract_fail}"
+                    else:
+                        reason = "invalid validator response"
 
             except Exception as exc:
                 relevant = False
@@ -842,7 +868,11 @@ Return ONLY valid JSON:
             len(context),
         )
 
-        route = self.router.route(goal, has_context=bool(context.strip()))
+        route = self.router.route(
+            goal,
+            has_context=bool(context.strip()),
+            has_attachments=bool(attachments),
+        )
 
         logger.info(
             "[router] mode=%s reason=%s conf=%.2f",
@@ -956,6 +986,8 @@ Return ONLY valid JSON:
         logger.info(f"[orchestrator] planning: {goal[:80]}")
         latency.start("planner")
         plan = self.task_planner.plan(goal, context=context)
+        # Unconditional defensive validation: Ensure plan is valid before execution
+        plan = PlannerContractValidator.validate(plan, goal=goal)
         profiler.add("planner", {"tokens_input": 0, "tokens_output": 0, "api_cost": 0})
         # Do not let CompletenessChecker expand a plan produced by the
         # deterministic TaskPlanner fallback. The fallback exists because
@@ -969,6 +1001,7 @@ Return ONLY valid JSON:
             )
         ):
             plan = self.completeness.check(plan)
+            plan = PlannerContractValidator.validate(plan, goal=goal)
         elif plan.get("planner_fallback"):
             logger.info(
                 "[AUDIT COMPLETENESS SKIP] planner_fallback=True "
@@ -1011,7 +1044,12 @@ Return ONLY valid JSON:
             kg.add_relation(goal, "requires", req_id)
             for dep_topic in k.get("depends_on", []):
                 for k2 in plan.get("knowledge_required", []):
-                    if k2["topic"] == dep_topic:
+                    if (
+                        k2.get("id") == dep_topic
+                        or k2.get("topic") == dep_topic
+                        or PlannerContractValidator.canonical_id(k2.get("id")) == PlannerContractValidator.canonical_id(dep_topic)
+                        or PlannerContractValidator.normalize_topic(k2.get("topic")) == PlannerContractValidator.normalize_topic(dep_topic)
+                    ):
                         dep_req_id = self._make_requirement_id(k2["topic"], k2["need"])
                         kg.add_relation(req_id, "depends_on", dep_req_id)
                         break
@@ -1152,7 +1190,12 @@ Return ONLY valid JSON:
                     dep_req_id = None
 
                     for k2 in plan.get("knowledge_required", []):
-                        if k2["topic"] == dep_topic:
+                        if (
+                            k2.get("id") == dep_topic
+                            or k2.get("topic") == dep_topic
+                            or PlannerContractValidator.canonical_id(k2.get("id")) == PlannerContractValidator.canonical_id(dep_topic)
+                            or PlannerContractValidator.normalize_topic(k2.get("topic")) == PlannerContractValidator.normalize_topic(dep_topic)
+                        ):
                             dep_req_id = self._make_requirement_id(
                                 k2["topic"],
                                 k2["need"],
@@ -2290,107 +2333,139 @@ Return ONLY valid JSON:
             "evidence, say so and identify the missing evidence."
         )
 
-        system_prompt = f"""Technical Research Assistant.
-📊 {len(all_facts)} facts collected.
+        # Stage 7 — Output Scaling.
+        #
+        # Research/evidence collection above remains unchanged.
+        # The previous single synthesis LLM call is replaced by
+        # deterministic section decomposition + execution + aggregation.
+        manifest = self.manifest_builder.build(plan, goal=goal)
+        scheduler = SectionScheduler(manifest)
+        store = SectionStore()
 
-PERSISTENT USER MEMORY:
-{memory_context or "(none)"}
+        # Store owns execution/output state; scheduler owns lifecycle.
+        for section in manifest.sections:
+            store.create(section.section_id)
 
-Treat PERSISTENT USER MEMORY as user-provided context only.
-Do NOT treat it as research evidence or add it to EXTRACTED FACTS.
-Use it only to resolve user/project context when relevant.
+        engine = ContinuationEngine(
+            worker=self.section_worker,
+            store=store,
+            outcome_classifier=self.outcome_classifier,
+            coverage_evaluator=self.coverage_evaluator,
+            continuation_policy=self.continuation_policy,
+        )
 
-EXTRACTED FACTS:
-{compact_facts}
+        scheduler.initialize()
 
-RESEARCH COMPLETENESS:
-{completeness_context}
+        section_context = {
+            "all_facts": all_facts,
+            "synthesis_evidence": synthesis_evidence,
+            "completeness_context": completeness_context,
+            "memory_context": memory_context,
+            "requirement_audit": requirement_audit,
+        }
 
-SOURCE MATERIAL:
-{evidence_text}
+        latency.start("output_scaling")
 
-FACT FIDELITY:
-- Preserve the exact meaning of every extracted fact.
-- Do not negate, reverse, or alter factual values.
-- For status, approval state, numeric values, URLs, and technical terms, preserve the source fact's meaning exactly.
+        while True:
+            ready_sections = scheduler.ready_sections()
 
-Use EXTRACTED FACTS as the primary factual source.
-Use SOURCE MATERIAL only when necessary.
-Do not invent facts.
+            if not ready_sections:
+                break
 
-SOURCE CONTEXT MATCHING:
-1. Untuk setiap benchmark, measurement, atau performance figure, periksa apakah kondisi pengujiannya sesuai dengan kondisi yang diminta user.
-2. Jangan gunakan benchmark sebagai bukti langsung untuk kondisi user jika benchmark dilakukan pada kondisi yang berbeda secara material.
-3. Jika kondisi benchmark berbeda atau tidak diketahui, pertahankan fakta dan provenance-nya, tetapi jelaskan mismatch atau ketidakpastiannya.
-4. Fakta yang terverifikasi tidak otomatis berarti fakta tersebut applicable untuk requirement yang sedang dijawab.
-5. Jika kondisi yang diminta user tidak didukung secara langsung oleh sumber yang tersedia, nyatakan bahwa informasi tersebut belum didukung oleh sumber yang ditemukan.
-6. Jangan melakukan scaling, extrapolation, atau substitusi hasil benchmark untuk memperkirakan kondisi user kecuali sumber secara eksplisit mendukung inference tersebut.
+            for section in ready_sections:
+                scheduler.mark_in_flight(section.section_id)
 
-CONTOH:
-Jika kondisi user adalah 100 Mbps tetapi sumber hanya menunjukkan benchmark WireGuard 1011 Mbps pada test environment yang berbeda:
-BENAR: Benchmark melaporkan 1011 Mbps pada kondisi pengujian tersebut, tetapi tidak membuktikan performa pada link 100 Mbps.
-SALAH: Jangan menyatakan bahwa WireGuard cocok untuk 100 Mbps hanya karena benchmark mencapai 1011 Mbps.
+                # Explicit scheduler -> store lifecycle synchronization.
+                store_state = store.get(section.section_id)
+                store_state.status = SectionStatus.IN_FLIGHT
+                store.put(store_state)
 
+                while True:
+                    step = engine.step(
+                        section,
+                        goal=goal,
+                        facts=all_facts,
+                        evidence=synthesis_evidence,
+                        context=section_context,
+                        requirement_audit=requirement_audit,
+                        memory=memory_context,
+                        temperature=0.3,
+                        max_tokens=section.budget_hint,
+                    )
 
-COMPARISON-FIRST REASONING:
-1. Jika user meminta perbandingan beberapa entity, protokol, produk, metode, atau alternatif, JANGAN memilih pemenang terlebih dahulu.
-2. Identifikasi kriteria perbandingan yang diminta user sebelum membuat kesimpulan.
-3. Untuk setiap kriteria, kumpulkan fakta yang tersedia untuk SETIAP entity yang dibandingkan.
-4. Bandingkan hanya fakta yang memiliki konteks dan kondisi pengukuran yang comparable.
-5. Jika sumber untuk suatu entity belum terkumpul untuk suatu kriteria, tandai sebagai "sumber belum ditemukan" dan jangan mengisi kekosongan dengan pengetahuan umum.
-6. Jika sumber berasal dari kondisi pengujian yang berbeda, jangan memperlakukannya sebagai perbandingan langsung. Jelaskan perbedaan konteksnya.
-7. Setelah comparison selesai, pisahkan dengan jelas:
-   - apa yang secara langsung didukung oleh sumber yang ditemukan,
-   - apa yang tidak dapat dibandingkan,
-   - dan apa yang dapat disimpulkan secara terbatas.
-8. REKOMENDASI hanya boleh dibuat SETELAH comparison selesai.
-9. Rekomendasi harus mengikuti hasil comparison, bukan menjadi tujuan yang dicari lalu didukung dengan fakta secara selektif.
-10. Jangan memilih satu entity sebagai "terbaik secara keseluruhan" jika sumber hanya menunjukkan keunggulan pada sebagian kriteria.
-11. Jika sumber yang ditemukan belum cukup untuk menentukan pemenang keseluruhan, katakan secara eksplisit bahwa pemenang keseluruhan tidak dapat ditentukan dari sumber yang ditemukan.
-12. Jangan menggunakan pengetahuan umum di luar sumber yang ditemukan untuk mengisi kekosongan atau memperkuat recommendation.
-13. Jangan membuat klaim teknis baru dari inferensi yang tidak dinyatakan oleh sumber yang ditemukan.
-14. Jangan membuat klaim absolut tentang karakteristik teknis, persyaratan sistem, atau performa pada kondisi spesifik yang tidak secara eksplisit diuji/disebutkan dalam sumber yang ditemukan.
+                    decision = step.policy.decision
 
-SOURCE SCOPE PRESERVATION:
-1. "Sumber tidak ditemukan" hanya boleh berarti sumber untuk entity/kriteria tersebut BELUM TERKUMPUL dalam research run ini.
-2. Jangan mengubahnya menjadi klaim bahwa informasi tersebut tidak ada di dunia nyata atau tidak pernah tersedia.
-3. Gunakan istilah "sumber belum ditemukan", "belum ditemukan dalam penelitian ini", atau "belum cukup untuk dibandingkan" bila cakupan research tidak lengkap.
-4. Jika Entity A memiliki sumber tetapi Entity B belum memiliki sumber, JANGAN menyimpulkan A unggul secara keseluruhan.
-5. Informasi yang belum ditemukan adalah celah informasi, bukan bukti negatif.
-6. Jangan memperlakukan ketiadaan fact sebagai bukti bahwa karakteristik entity tersebut buruk, lebih lambat, lebih mahal, kurang aman, atau lebih sulit.
-7. Jika kriteria penting belum memiliki sumber untuk semua entity, nyatakan bahwa comparison untuk kriteria tersebut belum lengkap.
-8. Jangan mengisi informasi yang belum ditemukan dengan general knowledge, asumsi teknis, atau inferensi.
-9. Jika research coverage belum lengkap, hasil synthesis harus mempertahankan status tersebut dan tidak boleh menyamarkan gap sebagai kesimpulan final.
-10. Rekomendasi hanya boleh memakai subset kriteria yang benar-benar memiliki sumber yang dapat dibandingkan.
+                    if decision.value == "CONTINUE":
+                        continue
 
-RECOMMENDATION FORMAT:
-- Comparison: ringkas hasil sumber yang ditemukan per kriteria.
-- Information gaps: sebutkan kriteria/entity yang belum memiliki sumber yang dapat dibandingkan.
-- Conclusion: simpulkan hanya apa yang benar-benar ditunjukkan comparison.
-- Recommendation: berikan rekomendasi hanya jika comparison cukup mendukungnya.
-- Jika comparison tidak cukup untuk menentukan pilihan, rekomendasikan pengujian langsung atau nyatakan bahwa sumber yang ditemukan belum cukup untuk memilih.
+                    store_state = store.get(section.section_id)
 
-CONTOH POLA:
-Jika:
-A = latency lebih rendah,
-B = CPU: sumber belum ditemukan,
-C = security: sumber belum cukup untuk dibandingkan,
+                    if decision.value == "FINALIZE":
+                        scheduler.mark_complete(section.section_id)
+                        store_state.status = SectionStatus.STORED_FINAL
 
-maka:
-BENAR:
-"A unggul pada latency berdasarkan benchmark tersebut. Sumber CPU dan security belum cukup untuk menentukan keunggulan keseluruhan."
+                    elif decision.value == "DEGRADE":
+                        scheduler.mark_degraded(section.section_id)
+                        store_state.status = SectionStatus.DEGRADED
 
-SALAH:
-"A adalah pilihan terbaik karena paling cepat, paling hemat CPU, dan paling aman."
+                    elif decision.value == "FAIL":
+                        scheduler.mark_failed(section.section_id)
+                        store_state.status = SectionStatus.FAILED
 
-Jangan mengubah fakta menjadi klaim yang lebih luas daripada yang didukung oleh sumber yang ditemukan.
-"""
+                    elif decision.value == "SPLIT":
+                        # SectionSplitter is not implemented in Stage 7.
+                        # Never silently convert SPLIT into FINALIZE.
+                        logger.warning(
+                            "[OUTPUT SCALING] SPLIT unsupported; degrading "
+                            "section=%s reason=%s",
+                            section.section_id,
+                            step.policy.reason,
+                        )
+                        scheduler.mark_degraded(section.section_id)
+                        store_state.status = SectionStatus.DEGRADED
 
-        latency.start("synthesis")
-        llm_result = self.llm.analyze(system_prompt, goal)
-        profiler.add("synthesis", llm_result)
-        profiler.add_facts("synthesis", len(all_facts))
-        latency.stop("synthesis")
+                    else:
+                        logger.error(
+                            "[OUTPUT SCALING] unsupported decision=%s section=%s",
+                            decision.value,
+                            section.section_id,
+                        )
+                        scheduler.mark_failed(section.section_id)
+                        store_state.status = SectionStatus.FAILED
+
+                    store.put(store_state)
+                    break
+
+        aggregated = self.output_aggregator.aggregate(manifest, store)
+
+        latency.stop("output_scaling")
+
+        # Preserve the existing downstream result/profiler contract while
+        # making the aggregated output the authoritative answer content.
+        llm_result = {
+            "content": aggregated.content,
+            "model": "output_scaling",
+            "requested_model": "output_scaling",
+            "finish_reason": None,
+            "tokens_input": 0,
+            "tokens_output": aggregated.total_tokens_used,
+            "api_cost": 0,
+        }
+
+        profiler.add("output_scaling", llm_result)
+        profiler.add_facts("output_scaling", len(all_facts))
+
+        logger.info(
+            "[OUTPUT SCALING] manifest=%s sections=%d final=%d degraded=%d "
+            "failed=%d tokens=%d status=%s",
+            manifest.manifest_id,
+            aggregated.sections_total,
+            aggregated.sections_final,
+            aggregated.sections_degraded,
+            aggregated.sections_failed,
+            aggregated.total_tokens_used,
+            aggregated.scaler_status.value,
+        )
 
         kg.save()
 

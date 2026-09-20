@@ -8,10 +8,16 @@ class Classifier:
         r'https?://(?:www\.)?(?:youtube\.com/watch\?[^\s]+|youtu\.be/[^\s]+)',
         re.IGNORECASE,
     )
+    OFFICIAL_API = re.compile(
+        r'^\s*\[[A-Z0-9_\s-]+OFFICIAL\s+API\]',
+        re.MULTILINE | re.IGNORECASE,
+    )
 
     def classify(self, content: str) -> str:
         if not content:
             return "general"
+        if self.OFFICIAL_API.search(content):
+            return "official_docs"
         if self.YOUTUBE_URL.search(content):
             return "video"
         headings = len(self.HEADING.findall(content))

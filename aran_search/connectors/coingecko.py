@@ -10,17 +10,51 @@ class CoinGeckoConnector(BaseConnector):
     """Official CoinGecko API connector."""
 
     PATTERN = re.compile(
-        r"^https?://(?:www\.)?coingecko\.com/(?:en/coins/)?([^/?#]+)",
+        r"^https?://(?:www\.)?coingecko\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?(?:coins|api)/([a-z0-9-]+)(?:[/?#]|$)",
         re.IGNORECASE,
     )
     API_URL = "https://api.coingecko.com/api/v3/simple/price"
 
+    RESERVED_SLUGS = {
+        "documentations",
+        "documentation",
+        "docs",
+        "pricing",
+        "explore",
+        "all",
+        "overview",
+        "api",
+        "news",
+        "portfolio",
+        "watchlist",
+        "categories",
+        "exchanges",
+        "derivatives",
+        "nft",
+        "learn",
+        "methodology",
+        "glossary",
+        "community",
+        "careers",
+        "press",
+        "legal",
+        "terms",
+        "privacy",
+        "cookies",
+        "advertising",
+    }
+
     def detect(self, url: str) -> bool:
-        return bool(self.PATTERN.search(url))
+        return self._extract_coin_id(url) is not None
 
     def _extract_coin_id(self, url: str) -> str | None:
         match = self.PATTERN.search(url)
-        return match.group(1) if match else None
+        if not match:
+            return None
+        coin_id = match.group(1).lower()
+        if coin_id in self.RESERVED_SLUGS:
+            return None
+        return coin_id
 
     def fetch(self, url: str) -> Document:
         cached = self._cache_get(url)

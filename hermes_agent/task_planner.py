@@ -3,300 +3,412 @@ import re
 import logging
 
 from hermes_agent.llm_output_contract import llm_output_failure
+from hermes_agent.plan_validator import PlannerContractValidator
 
 logger = logging.getLogger(__name__)
 
-
-MONTHS_EN = r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)'
-MONTHS_ID = r'(?:Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember)'
-MONTHS = rf'(?:{MONTHS_EN}|{MONTHS_ID})'
-
-DATE_PATTERNS = [
-    re.compile(rf'\b{MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:\s*,\s*|\s+)\d{{4}}\b', re.IGNORECASE),
-    re.compile(rf'\b\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTHS}(?:\s*,\s*|\s+)\d{{4}}\b', re.IGNORECASE),
-    re.compile(r'\b\d{4}-\d{2}-\d{2}\b'),
-    re.compile(rf'\b{MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?\b', re.IGNORECASE),
-    re.compile(rf'\b\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTHS}\b', re.IGNORECASE),
-    re.compile(rf'\b{MONTHS}\s+\d{{4}}\b', re.IGNORECASE),
-]
-
-ENTITY_PATTERN = re.compile(
-    r'\b([A-Z]{2,})[ \t]+(\d[\dA-Za-z-]*)\b(?:[ \t]+([A-Z][a-zA-Z]*))?'
-)
-
-DESIGN_TOPIC_MARKERS = (
-    "design", "tuning", "compatibility", "safety", "implementation",
-    "port", "enclosure", "box",
-)
-
+MONTH_MAP = {
+    "januari": "01", "january": "01", "jan": "01",
+    "februari": "02", "february": "02", "feb": "02",
+    "maret": "03", "march": "03", "mar": "03",
+    "april": "04", "apr": "04",
+    "mei": "05", "may": "05",
+    "juni": "06", "june": "06", "jun": "06",
+    "juli": "07", "july": "07", "jul": "07",
+    "agustus": "08", "august": "08", "aug": "08",
+    "september": "09", "sep": "09",
+    "oktober": "10", "october": "10", "okt": "10", "oct": "10",
+    "november": "11", "nov": "11",
+    "desember": "12", "december": "12", "des": "12", "dec": "12"
+}
 
 def extract_date_anchor(text: str) -> str:
+    """Extracts date in format YYYY-MM-DD, DD Month YYYY, or relative dates."""
     if not text:
         return ""
-    for pat in DATE_PATTERNS:
-        m = pat.search(text)
-        if m:
-            return m.group(0)
+    m = re.search(r'\b(20\d\d)[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b', text)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = re.search(r'\b(0[1-9]|[12]\d|3[01])[-/](0[1-9]|1[0-2])[-/](20\d\d)\b', text)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+    m = re.search(r'\b(0?[1-9]|[12]\d|3[01])\s+([A-Za-z]+)\s+(20\d\d)\b', text)
+    if m:
+        day = m.group(1).zfill(2)
+        month_str = m.group(2).lower()
+        year = m.group(3)
+        if month_str in MONTH_MAP:
+            return f"{year}-{MONTH_MAP[month_str]}-{day}"
+    m = re.search(r'\b([A-Za-z]+)\s+(0?[1-9]|[12]\d|3[01]),?\s+(20\d\d)\b', text)
+    if m:
+        month_str = m.group(1).lower()
+        day = m.group(2).zfill(2)
+        year = m.group(3)
+        if month_str in MONTH_MAP:
+            return f"{year}-{MONTH_MAP[month_str]}-{day}"
     return ""
 
+def extract_temporal_anchor(text: str) -> str:
+    """Extracts year, month-year, or relative day anchors from text."""
+    if not text:
+        return ""
+    date_anchor = extract_date_anchor(text)
+    if date_anchor:
+        return date_anchor
+    m = re.search(r'\b(20\d\d)\b', text)
+    if m:
+        return m.group(1)
+    m = re.search(r'\b(hari ini|today|saat ini|sekarang|current|kemarin|yesterday|besok|tomorrow)\b', text, re.I)
+    if m:
+        return m.group(1).lower()
+    return ""
 
-def extract_entity_tokens(context: str) -> list:
-    if not context:
-        return []
-    match = ENTITY_PATTERN.search(context)
-    if not match:
-        return []
-    return [g for g in match.groups() if g]
+def extract_entity_anchor(text: str) -> str:
+    """Extracts high-value core entity names like Bitcoin, Ethereum, Solana, etc."""
+    if not text:
+        return ""
+    common_entities = [
+        "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+        "binance", "coingecko", "coinmarketcap", "tokocrypto", "indodax"
+    ]
+    words = re.findall(r'\b[A-Za-z0-9_.-]+\b', text.lower())
+    found = []
+    for ent in common_entities:
+        if ent in words:
+            found.append(ent)
+    return " ".join(found)
 
-
-def _is_design_related(topic: str) -> bool:
-    t = topic.lower()
-    return any(marker in t for marker in DESIGN_TOPIC_MARKERS)
-
-
-def _has_entity(topic: str, entity_tokens: list) -> bool:
-    t = topic.lower()
-    return all(tok.lower() in t for tok in entity_tokens)
-
+def inherit_entity_anchor(child_topic: str, parent_topic: str) -> str:
+    """If child lacks entity present in parent, inject it into child."""
+    parent_ent = extract_entity_anchor(parent_topic)
+    child_ent = extract_entity_anchor(child_topic)
+    if parent_ent and not child_ent:
+        return f"{child_topic} {parent_ent}".strip()
+    return child_topic
 
 def inherit_date_anchor(child_topic: str, parent_topic: str) -> str:
-    parent_date = extract_date_anchor(parent_topic)
-    if not parent_date:
-        return child_topic
+    """If child lacks date anchor present in parent, inject it into child."""
+    parent_date = extract_temporal_anchor(parent_topic)
+    child_date = extract_temporal_anchor(child_topic)
+    if parent_date and not child_date:
+        return f"{child_topic} {parent_date}".strip()
+    return child_topic
 
-    if parent_date.lower() in child_topic.lower():
-        return child_topic
-
-    child_date = extract_date_anchor(child_topic)
-    if child_date:
-        return child_topic
-
-    idx = parent_topic.lower().find(parent_date.lower())
-    parent_prefix = parent_topic[:idx].strip()
-    parent_prefix_words = parent_prefix.split()
-    child_words = child_topic.split()
-
-    if child_words and parent_prefix_words:
-        first_cw = child_words[0].lower()
-        parent_lowers = [pw.lower() for pw in parent_prefix_words]
-        if first_cw in parent_lowers and first_cw != parent_lowers[0]:
-            p_idx = parent_lowers.index(first_cw)
-            missing_leading = parent_prefix_words[:p_idx]
-            child_words = missing_leading + child_words
-            child_topic = " ".join(child_words)
-
-    match_count = 0
-    for pw, cw in zip(parent_prefix_words, child_words):
-        if pw.lower() == cw.lower():
-            match_count += 1
-        else:
-            break
-
-    if match_count > 0:
-        parent_remaining_entity = []
-        for w in parent_prefix_words[match_count:]:
-            if w[0].isupper() and w.lower() not in [cw.lower() for cw in child_words]:
-                parent_remaining_entity.append(w)
-            else:
-                break
-
-        insert_parts = []
-        if parent_remaining_entity:
-            insert_parts.append(" ".join(parent_remaining_entity))
-        insert_parts.append(parent_date)
-        insert_str = " ".join(insert_parts)
-
-        prefix = " ".join(child_words[:match_count])
-        suffix = " ".join(child_words[match_count:])
-        if suffix:
-            return f"{prefix} {insert_str} {suffix}"
-        else:
-            return f"{prefix} {insert_str}"
-    else:
-        entity_words = [
-            w for w in parent_prefix_words
-            if w[0].isupper() and w.lower() not in [cw.lower() for cw in child_words]
-        ]
-        if entity_words:
-            entity_str = " ".join(entity_words)
-            return f"{entity_str} {parent_date} {child_topic}"
-        else:
-            return f"{parent_date} {child_topic}"
-
+def deduplicate_anchors_in_topic(topic: str) -> str:
+    """Clean up duplicated words/tokens in topic caused by multiple inheritances."""
+    words = topic.split()
+    seen = set()
+    cleaned = []
+    for w in words:
+        wl = w.lower().strip("(),.")
+        if wl not in seen or len(wl) <= 2:
+            cleaned.append(w)
+            if len(wl) > 2:
+                seen.add(wl)
+    return " ".join(cleaned)
 
 def normalize_plan_entity_anchor(plan: dict, context: str = "", goal: str = "") -> dict:
-    global_entity_tokens = extract_entity_tokens(context) if context else []
-    global_entity_prefix = " ".join(global_entity_tokens) if global_entity_tokens else ""
+    """
+    Deterministically propagates entity & date anchors through dependency chains (P1).
+    Ensures children inherit missing parent anchors and context anchors.
+    """
+    if not isinstance(plan, dict):
+        return plan
 
     knowledge = plan.get("knowledge_required", [])
     topic_mapping = {}
+    id_to_topic = {k.get("id"): k.get("topic") for k in knowledge if k.get("id") and k.get("topic")}
 
     for k in knowledge:
         orig_topic = k.get("topic", "")
-        if not orig_topic:
-            continue
-
         new_topic = orig_topic
 
         # 1. Inherit anchors from depends_on
         for dep in k.get("depends_on", []):
-            parent_topic = topic_mapping.get(dep, dep)
+            resolved_dep_topic = id_to_topic.get(dep, dep)
+            parent_topic = topic_mapping.get(resolved_dep_topic, resolved_dep_topic)
 
             # Inherit date anchor if parent has date and child does not
             new_topic = inherit_date_anchor(new_topic, parent_topic)
+            # Inherit entity anchor if parent has entity and child does not
+            new_topic = inherit_entity_anchor(new_topic, parent_topic)
 
-            # Inherit hardware/model entity if parent has one
-            parent_hw = extract_entity_tokens(parent_topic)
-            if parent_hw and not _has_entity(new_topic, parent_hw):
-                hw_prefix = " ".join(parent_hw)
-                new_topic = f"{hw_prefix} {new_topic}"
+        # 2. Inherit date anchor from goal/context if still missing
+        if not extract_date_anchor(new_topic):
+            context_date = extract_date_anchor(goal) or extract_date_anchor(context)
+            if context_date:
+                new_topic = f"{new_topic} {context_date}".strip()
 
-        # 2. Context/Goal hardware entity fallback
-        if global_entity_tokens and _is_design_related(new_topic) and not _has_entity(new_topic, global_entity_tokens):
-            new_topic = f"{global_entity_prefix} {new_topic}"
+        # 3. Inherit entity anchor from goal/context if still missing
+        if not extract_entity_anchor(new_topic):
+            context_ent = extract_entity_anchor(goal) or extract_entity_anchor(context)
+            if context_ent:
+                new_topic = f"{new_topic} {context_ent}".strip()
 
-        if new_topic != orig_topic:
-            k["topic"] = new_topic
-            topic_mapping[orig_topic] = new_topic
-
-    # Update depends_on references if any parent topics were normalized
-    if topic_mapping:
-        for k in knowledge:
-            new_deps = [topic_mapping.get(d, d) for d in k.get("depends_on", [])]
-            k["depends_on"] = new_deps
+        new_topic = deduplicate_anchors_in_topic(new_topic)
+        topic_mapping[orig_topic] = new_topic
+        k["topic"] = new_topic
 
     return plan
 
-
 class TaskPlanner:
-    """Goal-based planner. Output: structured knowledge, bukan intent."""
+    def __init__(self, llm):
+        self.llm = llm
 
-    def __init__(self, llm_analyzer=None):
-        self.llm = llm_analyzer
+    @staticmethod
+    def _normalize_planner_payload(raw) -> dict | None:
+        """
+        Deterministic, contract-aware payload normalization (P1-A).
+        Handles native dict, markdown fences, </think> reasoning prefix,
+        and bounded single-object JSON via JSONDecoder.raw_decode.
+        Rejects non-dict JSON (lists, scalars), malformed JSON, and prose.
+        """
+        if isinstance(raw, dict):
+            return raw
 
-    def plan(self, goal: str, context: str = "") -> dict:
-        if not self.llm:
-            return self._fallback(goal, context)
+        if not isinstance(raw, str):
+            return None
 
-        prompt = f"""Anda adalah Knowledge Planner. Breakdown PERTANYAAN AKTIF berikut menjadi pengetahuan yang harus dikumpulkan.
+        text = raw.strip()
+        if not text:
+            return None
 
-Active user question:
-{goal}
+        # 1. Strip reasoning model thinking tags if present
+        if "</think>" in text:
+            text = text.split("</think>", 1)[1].strip()
+        elif "<think>" in text:
+            return None
 
-Conversation context (gunakan hanya untuk memahami referensi seperti "ini", "tersebut", atau follow-up):
-{context if context else "(none)"}
+        if not text:
+            return None
 
-ATURAN CONTEXT:
-- Pertanyaan aktif adalah sumber utama scope research.
-- Conversation context hanya membantu memahami referensi/entitas yang tidak lengkap pada pertanyaan aktif.
-- Pernyataan atau diagnosis dari assistant sebelumnya adalah CLAIM yang belum terverifikasi, bukan FACT.
-- Jangan membuat requirement berdasarkan spekulasi assistant sebelumnya kecuali requirement tersebut memang diperlukan untuk MEMVERIFIKASI spekulasi itu.
-- Jangan mengubah pertanyaan aktif menjadi research terhadap seluruh percakapan.
-- Jika conversation context secara eksplisit telah menetapkan kategori/tipe suatu entity atau model, penetapan tersebut boleh digunakan sebagai resolved context untuk menjaga kesinambungan research.
-- Jangan menebak kategori dari nama, brand, atau kemiripan model.
-- Entity/model yang sudah teridentifikasi secara eksplisit dalam resolved context harus dipertahankan pada requirement yang bergantung padanya.
+        # 2. Try direct JSON parsing
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+        except Exception:
+            pass
 
-IMPORTANT: For questions that explicitly mention an RFC or IETF,
-add a constraint requiring official IETF, RFC Editor, or IETF Datatracker
-sources and excluding third-party sources as factual evidence.
+        # 3. Try markdown code fences ```json ... ``` or ``` ... ```
+        fence_pattern = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.DOTALL)
+        for match in fence_pattern.finditer(text):
+            try:
+                parsed = json.loads(match.group(1))
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                continue
 
-IMPORTANT: Do not assume a product category or type from a brand name or
-model similarity to another well-known product. Similar names may refer to
-products in VERY DIFFERENT categories (for example, "ACR" can mean many
-different things depending on context). If the product category is NOT
-explicitly stated in the goal, generated topics must remain GENERIC and
-based only on the words in the goal itself (for example, "product official
-specification" or "product category identification") -- DO NOT invent
-specific technical topics (interface, SDK, protocol, certification, etc.)
-that are not supported by the words in the goal.
+        # 4. Bounded extraction via json.JSONDecoder.raw_decode
+        start_idx = text.find("{")
+        while start_idx != -1:
+            try:
+                decoder = json.JSONDecoder()
+                parsed, _ = decoder.raw_decode(text[start_idx:])
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+            start_idx = text.find("{", start_idx + 1)
+
+        return None
+
+    def plan(self, goal: str, context: str = "", max_attempts: int = 2) -> dict:
+        prompt = f"""Kamu adalah Task Planner untuk Autonomous Research Agent.
+Tugasmu adalah menganalisis research goal dan menghasilkan structured research plan.
+
+Research Goal: {goal}
+Context: {context if context else "None"}
+
+INSTRUCTIONS:
+1. Analisis apa saja informasi yang BENAR-BENAR DIBUTUHKAN untuk menjawab goal.
+2. Identifikasi deliverables yang konkret (apa yang harus dihasilkan).
+3. Buat daftar knowledge requirements yang spesifik dan terarah.
+4. Tentukan dependensi antar knowledge requirements (apa yang harus dicari lebih dulu).
+5. Definisikan constraints dan success criteria yang terukur.
+6. HANYA rencanakan informasi yang eksplisit relevan untuk menjawab goal.
+   JANGAN merencanakan audit, investigasi sekunder, verifikasi kredibilitas,
+   metodologi agregasi, atau cross-check pihak ketiga KECUALI goal secara eksplisit
+   memintanya (misal ada kata 'validasi', 'verifikasi', 'audit', 'kredibilitas').
+   Fokus langsung ke data/fakta yang diminta user.
+7. GROUNDING RULE (CRITICAL):
+   - Scope research plan HANYA pada entitas, objek, parameter, dan sistem yang
+     disebutkan secara eksplisit dalam goal atau context.
+   - JANGAN PERNAH menambahkan sub-topik spekulatif dari domain yang berbeda.
+   - JANGAN mengasumsikan sistem periferal yang tidak disebutkan.
+   - Jika goal menyebut sistem spesifik, fokus HANYA pada sistem tersebut.
+   - DILARANG menambahkan requirements tentang sub-sistem spekulatif
+     yang tidak didukung oleh kata-kata dalam goal.
+
+SUCCESS CRITERIA GROUNDING RULE:
+- Setiap success criterion harus dapat ditelusuri langsung ke kata-kata dalam goal.
+- DILARANG menambahkan kriteria yang mewajibkan konfirmasi sistem yang tidak diminta.
+- Success criteria harus menguji apakah pertanyaan user terjawab, BUKAN apakah
+  topik spekulatif yang kamu tambahkan sendiri terpenuhi.
+
+SCOPE BOUNDARY:
+- Rencanakan HANYA apa yang secara eksplisit diminta oleh goal atau didukung konteks.
+- JANGAN berinisiatif meneliti sub-sistem atau parameter tambahan
+  yang tidak didukung oleh kata-kata dalam goal.
 
 Return JSON:
 {{
     "goal": "goal yang sudah dipertajam",
-    "deliverables": ["output 1", "output 2", ...],
+    "deliverables": [
+        {{
+            "id": "canonical_snake_case_id",
+            "type": "number|string|boolean|list|object",
+            "description": "deskripsi deliverable yang jelas dan atomik"
+        }}
+    ],
     "knowledge_required": [
         {{
+            "id": "req_canonical_snake_case_id",
             "topic": "topik spesifik (bisa dicari di mesin pencari)",
             "need": "apa yang dibutuhkan (datasheet, tutorial, procedure, specification, example, documentation)",
+            "produces_deliverable": ["id_deliverable_yang_dihasilkan_oleh_node_ini"],
             "priority": "high|medium|low",
-            "depends_on": ["topic lain yang harus ditemukan lebih dulu", ...],
+            "depends_on": ["id atau topic prerequisite yang harus ditemukan lebih dulu", ...],
             "status": "missing"
         }}
     ],
-    "constraints": ["batasan atau preferensi"],
-    "success_criteria": ["kriteria keberhasilan"],
+    "constraints": ["constraint 1", ...],
+    "success_criteria": ["kriteria 1", ...],
     "confidence": 0.0-1.0
 }}
+
+OUTCOME CONTRACT & DELIVERABLES:
+- Deliverables adalah item data konkret yang menjadi jawaban langsung untuk goal user.
+- Setiap deliverable WAJIB memiliki "id" (snake_case unik), "type" (number|string|boolean|list|object), dan "description".
+- Setiap deliverable WAJIB diproduksi oleh setidaknya satu requirement di "knowledge_required" melalui "produces_deliverable".
+- JANGAN membuat deliverable yang tidak pernah diproduksi oleh requirement manapun.
 
 SUCCESS CRITERIA:
 - Setiap success criterion harus dapat ditelusuri langsung ke goal,
   active question, resolved context, atau prerequisite yang benar-benar
-  diperlukan untuk memenuhi goal.
-- Jangan membuat jumlah minimum hasil seperti "at least 3" kecuali
-  diminta user atau diwajibkan secara eksplisit oleh goal.
-- Jangan menambahkan deliverable atau criterion hanya agar research
-  terlihat lebih lengkap.
+  dibutuhkan untuk menjawab.
+- Kriteria harus berupa penyelesaian deliverable konkret atau verifikasi
+  fakta penting, BUKAN meta-eksplorasi.
 
-ENTITY/SCOPE PRESERVATION:
-- Pertahankan nama entity/model spesifik yang sudah ditetapkan secara
-  eksplisit dalam resolved context ketika requirement bergantung pada
-  entity tersebut.
-- Searchability tidak boleh menjadi alasan menghapus entity anchor.
-- Jangan mengganti entity/model spesifik dengan kategori generic jika
-  resolved context sudah memberikan kategori tersebut secara eksplisit.
-- Jika resolved context telah mengidentifikasi entity/model spesifik yang
-  menjadi objek research, entity tersebut adalah SUBJECT ANCHOR untuk
-  seluruh knowledge_required yang membahas desain, tuning, compatibility,
-  safety, implementation, atau pencarian sumber untuk objek tersebut.
-- Setiap topic dalam branch tersebut WAJIB menyebut entity/model secara
-  eksplisit. Jangan mengganti entity/model dengan kategori generik seperti
-  "12-inch speaker", "subwoofer", atau "speaker".
-- depends_on tidak menggantikan entity anchor. Dependency tetap dapat
-  digunakan, tetapi topic yang bergantung padanya tetap harus menyebut
-  entity/model.
+REQUIREMENT COHESION & GRANULARITY:
+- ATOMIC ENTITY COHESION: Jika pertanyaan meminta beberapa deliverable,
+  field data, nilai, atau atribut yang berasal dari subjek/entitas dan
+  sumber logis yang sama (misalnya: probabilitas, judul pasar, dan
+  tanggal resolusi untuk pasar pemilu di Polymarket), SELURUH kebutuhan
+  tersebut WAJIB disatukan dalam SATU requirement (1 node).
+  Rangkum semua kebutuhan field tersebut ke dalam "need".
+  JANGAN memecah menjadi node terpisah untuk setiap field.
+- SINGLE-TARGET FACT / SPECIFIC LOOKUP: Jika pertanyaan meminta nilai, harga,
+  metrik, status, atau fakta dari entitas atau platform tertentu (misalnya:
+  "Berapa harga Ethereum saat ini menurut CoinGecko?", "Berapa kurs USD di BCA?",
+  "Harga Bitcoin menurut Binance"), plan WAJIB HANYA menghasilkan SATU knowledge
+  requirement (1 node) untuk mengambil data dari platform/entitas tersebut.
+  Platform yang disebut user diperlakukan sebagai sumber otoritatif yang diminta.
+  JANGAN membuat requirement tambahan untuk meneliti dokumentasi/FAQ platform,
+  mengaudit akurasi data platform, atau memverifikasi apakah platform menggunakan
+  agregasi pihak ketiga, KECUALI jika user secara eksplisit meminta audit tersebut.
+- NO PROCEDURAL DECOMPOSITION: JANGAN memecah proses pencarian ke dalam
+  langkah-langkah prosedural seperti "identify market page",
+  "extract details", dan "verify source". Satu requirement sudah mencakup
+  menemukan bukti sekaligus mengekstrak seluruh field yang diminta.
+- CONSTRAINTS ARE NOT REQUIREMENTS: Batasan sumber, platform, atau
+  metodologi (seperti "Use Polymarket data only", "hanya dari situs resmi",
+  "exclude third-party") adalah CONSTRAINTS. Masukkan batasan tersebut ke
+  dalam array "constraints". JANGAN membuat node terpisah di
+  "knowledge_required" untuk memverifikasi batasan tersebut.
+- STRICT DEPENDENCY PREREQUISITES: Gunakan depends_on HANYA jika
+  pencarian Topik B secara mutlak membutuhkan identitas, entitas, atau
+  output spesifik yang baru bisa diketahui setelah Topik A selesai
+  ditemukan. Jika entitas target sudah didefinisikan secara eksplisit
+  pada pertanyaan aktif (misalnya: "Donald Trump 2028 U.S. presidential
+  election according to Polymarket"), depends_on WAJIB [].
 
-Setiap topic harus SPESIFIK dan dapat dicari.
-Gunakan bahasa Inggris untuk topic (lebih universal untuk search).
-Return HANYA JSON."""
+CONSTRAINTS:
+- Batasan yang relevan, misal: "fokus sumber resmi", "hindari spekulasi".
 
-        # PATCH 4: validate/retry BEFORE _fallback() -- a truncated or
-        # empty LLM response used to go straight to _fallback(), which
-        # sets topic=goal (the full raw user question) as the search
-        # query. Retrying first gives the 9router round-robin a chance
-        # to land on a model that actually completes the JSON.
-        #
-        # PATCH 4c: each attempt requests a larger max_tokens than the
-        # last (512, then 1024) -- an early example schedule, not a
-        # final number, meant to bound a slow/expensive attempt without
-        # waiting for a model's own (sometimes very large) default.
-        max_attempts = 2
+PENTING:
+- knowledge_required harus spesifik, BUKAN pertanyaan umum.
+  BURUK: "apa itu LoRa?"
+  BAIK: "Spesifikasi frekuensi LoRa SX1276 untuk region Indonesia AS923"
+- depends_on menunjukkan urutan logis: jika B butuh output dari A, maka B depends_on A.
+- priority: "high" untuk blocking info, "medium" untuk supporting, "low" untuk nice-to-have.
+- Batasi knowledge_required maksimal 5-7 items agar riset fokus dan efisien.
+
+JSON ONLY. Tanpa penjelasan, tanpa markdown block."""
+
         max_tokens_schedule = [1536, 3072]
         for attempt in range(1, max_attempts + 1):
             attempt_max_tokens = max_tokens_schedule[min(attempt - 1, len(max_tokens_schedule) - 1)]
             try:
+                system_prompt = (
+                    "Kamu adalah task planner JSON generator. "
+                    "Keluarkan HANYA raw JSON object yang valid. "
+                    "DILARANG keras menyertakan markdown code fence seperti ```json atau ```. "
+                    "DILARANG menyertakan teks pembuka, penutup, atau analisis di luar JSON. "
+                    "Format yang valid dimulai dengan '{' dan diakhiri dengan '}'."
+                )
+                user_query = f"{prompt}\n\nReturn HANYA JSON."
                 result = self.llm.analyze(
-                    "Kamu knowledge planner. Return JSON only.",
-                    prompt, temperature=0.2,
-                    max_tokens=attempt_max_tokens,
+                    system_prompt=system_prompt,
+                    user_query=user_query,
+                    temperature=0.2,
+                    max_tokens=attempt_max_tokens
                 )
             except Exception as e:
-                logger.warning(f"[task_planner] call failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): {e}")
+                logger.warning(
+                    f"[task_planner] call failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): {e}"
+                )
                 continue
 
-            failure = llm_output_failure(result)
-            if failure is not None:
-                logger.warning(f"[task_planner] output contract failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): {failure}")
+            if not isinstance(result, dict):
+                logger.warning(
+                    f"[task_planner] output contract failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): invalid_result_type"
+                )
                 continue
+
+            # Check truncation across all content representations (P1-A)
+            if str(result.get("finish_reason", "")).strip().lower() == "length":
+                logger.warning(
+                    f"[task_planner] output contract failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): length_truncated"
+                )
+                continue
+
+            raw_content = result.get("content")
+
+            if isinstance(raw_content, dict):
+                candidate_dict = raw_content
+            else:
+                failure = llm_output_failure(result)
+                if failure is not None:
+                    logger.warning(
+                        f"[task_planner] output contract failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): {failure}"
+                    )
+                    continue
+
+                candidate_dict = self._normalize_planner_payload(raw_content)
+                if candidate_dict is None:
+                    logger.warning(
+                        f"[task_planner] parse failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): no valid JSON object extracted"
+                    )
+                    continue
 
             try:
-                text = result["content"].strip().replace("```json", "").replace("```", "")
-                logger.info("[PLANNER RAW] %r", text)
-                plan = json.loads(text)
-                plan = normalize_plan_entity_anchor(plan, context=context, goal=goal)
+                logger.info(
+                    "[PLANNER RAW] %r",
+                    candidate_dict if isinstance(raw_content, dict) else raw_content,
+                )
+                plan = normalize_plan_entity_anchor(candidate_dict, context=context, goal=goal)
+                # Unconditional canonical validation boundary (I12)
+                plan = PlannerContractValidator.validate(plan, goal=goal)
                 return plan
             except Exception as e:
-                logger.warning(f"[task_planner] parse failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): {e}")
-                continue
+                logger.warning(
+                    f"[task_planner] parse failed (attempt {attempt}/{max_attempts}, max_tokens={attempt_max_tokens}): {e}"
+                )
+                if attempt == max_attempts:
+                    return self._fallback(goal, context)
 
         logger.warning(f"[task_planner] all {max_attempts} attempts exhausted, falling back")
         return self._fallback(goal, context)
@@ -304,38 +416,50 @@ Return HANYA JSON."""
     def _fallback(self, goal: str, context: str = "") -> dict:
         plan = {
             "goal": goal,
-            "deliverables": ["answer"],
+            "deliverables": [
+                {
+                    "id": "answer",
+                    "type": "string",
+                    "description": "Direct answer to the research goal",
+                }
+            ],
             "knowledge_required": [
-                {"topic": goal, "need": "general information", "priority": "high", "depends_on": [], "status": "missing"}
+                {
+                    "id": "req_1",
+                    "topic": goal,
+                    "need": "general information",
+                    "priority": "high",
+                    "produces_deliverable": ["answer"],
+                    "depends_on": [],
+                    "status": "missing",
+                }
             ],
             "constraints": [],
             "success_criteria": ["question answered"],
             "confidence": 0.5,
-            # Explicitly mark that structured planning failed.
-            # Core must not treat this fallback as a normal low-confidence
-            # plan and ask CompletenessChecker to invent new requirements.
             "planner_fallback": True,
         }
-        plan = normalize_plan_entity_anchor(plan, context=context, goal=goal)
-        return plan
+        return normalize_plan_entity_anchor(plan, context=context, goal=goal)
 
-    def get_missing(self, plan: dict) -> list:
+    def get_next_topic(self, plan: dict) -> str:
         knowledge = plan.get("knowledge_required", [])
         missing = [k for k in knowledge if k.get("status") == "missing"]
         found_topics = {k["topic"] for k in knowledge if k.get("status") == "found"}
+        found_ids = {k.get("id") for k in knowledge if k.get("status") == "found" and k.get("id")}
+        found_all = found_topics | found_ids
 
         def sort_key(k):
             priority_order = {"high": 0, "medium": 1, "low": 2}
-            deps_met = all(d in found_topics for d in k.get("depends_on", []))
+            deps_met = all(d in found_all for d in k.get("depends_on", []))
             return (priority_order.get(k.get("priority"), 1), not deps_met)
 
         missing.sort(key=sort_key)
-        return missing
+        return missing[0]["topic"] if missing else None
 
     def mark_found(self, plan: dict, topic: str):
         for k in plan.get("knowledge_required", []):
-            if k["topic"] == topic:
+            if k.get("topic") == topic or k.get("id") == topic:
                 k["status"] = "found"
 
     def is_complete(self, plan: dict) -> bool:
-        return all(k.get("status") == "found" for k in plan.get("knowledge_required", []))
+        return self.get_next_topic(plan) is None

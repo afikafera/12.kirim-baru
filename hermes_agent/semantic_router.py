@@ -23,6 +23,13 @@ class SemanticRouter:
     # like "Ingatkan saya nanti...".
     POLITE_PREFIXES = ("tolong ", "mohon ", "coba ", "please ")
 
+    # Non-data colon labels that frequently appear as conversational metadata or prompts
+    METADATA_COLON_PREFIXES = (
+        "note", "catatan", "pertanyaan", "question", "instruksi", "instruction",
+        "format", "warning", "peringatan", "tips", "sumber", "source", "author",
+        "topik", "topic", "lokasi", "location", "nama", "name", "jabatan",
+    )
+
     def _is_memory_intent(self, q: str) -> bool:
         s = q.lower().strip()
         for prefix in self.POLITE_PREFIXES:
@@ -31,7 +38,12 @@ class SemanticRouter:
                 break
         return any(s.startswith(t) for t in self.MEMORY_TRIGGERS)
 
-    def route(self, query: str, has_context: bool = False) -> RouteResult:
+    def route(
+        self,
+        query: str,
+        has_context: bool = False,
+        has_attachments: bool = False,
+    ) -> RouteResult:
         q = query.strip()
 
         if self._is_memory_intent(q):
@@ -85,18 +97,14 @@ class SemanticRouter:
                 confidence=0.95,
             )
 
+        # -------------------------------------------------------------
+        # EXTERNAL DEPENDENCY PRECEDENCE (Must strictly precede Direct)
+        # -------------------------------------------------------------
         if self._looks_like_external_lookup(q.lower()):
             return RouteResult(
                 mode="research",
                 reason="research_required",
                 confidence=0.90,
-            )
-
-        if self._looks_like_empirical_research(q.lower()):
-            return RouteResult(
-                mode="research",
-                reason="empirical_research",
-                confidence=0.92,
             )
 
         if self._looks_like_external_media(q):
@@ -106,18 +114,35 @@ class SemanticRouter:
                 confidence=0.98,
             )
 
+        if self._has_explicit_search_command(q.lower()):
+            return RouteResult(
+                mode="research",
+                reason="explicit_search_command",
+                confidence=0.92,
+            )
+
+        if self._looks_like_empirical_research(q.lower()):
+            return RouteResult(
+                mode="research",
+                reason="empirical_research",
+                confidence=0.92,
+            )
+
+        # -------------------------------------------------------------
+        # DIRECT REASONING (Zero external dependency)
+        # -------------------------------------------------------------
+        if self._is_self_contained_reasoning(q, has_attachments=has_attachments):
+            return RouteResult(
+                mode="direct",
+                reason="self_contained_reasoning",
+                confidence=0.90,
+            )
+
         if self._is_logic_reasoning(q):
             return RouteResult(
                 mode="direct",
                 reason="logic_reasoning",
                 confidence=0.90,
-            )
-
-        if self._is_self_contained_reasoning(q):
-            return RouteResult(
-                mode="direct",
-                reason="self_contained_reasoning",
-                confidence=0.88,
             )
 
         if self._is_short_llm(q):
@@ -233,48 +258,91 @@ class SemanticRouter:
 
         return any(term in s for term in media_terms)
 
+    def _has_explicit_search_command(self, s: str) -> bool:
+        search_prefixes = (
+            "cari ", "carikan ", "temukan ", "search ", "find ", "lookup ",
+            "tolong cari ", "tolong carikan ", "coba cari ", "coba carikan ",
+        )
+        return any(s.startswith(p) or f"\n{p}" in s for p in search_prefixes)
+
+    def _has_syntactic_data_payload(self, q: str) -> bool:
+        # 1. Structured key: value pairs
+        # Delimiters before key: start-of-string, newline, comma, semicolon, or preceding colon
+        raw_pairs = re.findall(
+            r"(?:^|[\n,;:])\s*([A-Za-z0-9_\-/\s]{1,25})[^\S\n]*:[^\S\n]*([^,\n;]+)",
+            q,
+        )
+        valid_pairs = 0
+        for label, val in raw_pairs:
+            lbl_clean = label.strip().lower()
+            val_clean = val.strip().lower()
+            if lbl_clean in self.METADATA_COLON_PREFIXES or val_clean.startswith("//"):
+                continue
+            if (
+                re.search(r"[\d$%€£¥]", val_clean)
+                or (len(val_clean.split()) <= 5 and not val_clean.endswith("?"))
+            ):
+                valid_pairs += 1
+
+        if valid_pairs >= 2:
+            return True
+
+        # 2. Comma/newline-separated item + numeric payload (e.g. 'Makan 50000, Transport 20000, Pulsa 15000')
+        item_num_matches = re.findall(
+            r"(?:^|[\n,;:])\s*([A-Za-z][A-Za-z0-9_\-]{0,20})\s+([\d$%€£¥]+[A-Za-z0-9\.,]*|\d+)\b",
+            q,
+        )
+        valid_items = [
+            (k.strip().lower(), v) for k, v in item_num_matches
+            if k.strip().lower() not in self.METADATA_COLON_PREFIXES
+            and k.strip().lower() not in ("tahun", "year", "jam", "menit", "detik", "pada", "in")
+        ]
+        return len(valid_items) >= 2
+
     def _is_logic_reasoning(self, q: str):
         s = q.lower()
 
         logic_patterns = (
-            "apakah",
-            "boleh menyimpulkan",
-            "pasti",
-            "siapa yang paling",
-            "mana yang",
-            "benarkah",
-            "jika",
-            "maka",
-        )
-
-        return (
-            len(q.split()) >= 8
-            and any(pattern in s for pattern in logic_patterns)
-            and not self._looks_like_external_lookup(s)
-            and not self._looks_like_empirical_research(s)
-        )
-
-    def _is_self_contained_reasoning(self, q: str):
-        s = q.lower()
-
-        reasoning_terms = (
-            "tentukan",
-            "jelaskan",
-            "hitung",
-            "buktikan",
-            "mengapa",
-            "kenapa",
-            "bagaimana",
-            "langkah penalaran",
-            "secara logis",
+            r"\bapakah\b",
+            r"\bboleh menyimpulkan\b",
+            r"\bpasti\b",
+            r"\bsiapa yang paling\b",
+            r"\bmana yang\b",
+            r"\bbenarkah\b",
+            r"\bjika\b",
+            r"\bmaka\b",
         )
 
         return (
             len(q.split()) >= 6
-            and any(term in s for term in reasoning_terms)
+            and any(re.search(pattern, s) for pattern in logic_patterns)
             and not self._looks_like_external_lookup(s)
             and not self._looks_like_empirical_research(s)
         )
+
+    def _is_self_contained_reasoning(
+        self,
+        q: str,
+        has_attachments: bool = False,
+    ):
+        s = q.lower()
+
+        reasoning_terms = (
+            "tentukan", "jelaskan", "hitung", "buktikan", "mengapa", "kenapa",
+            "bagaimana", "langkah penalaran", "secara logis", "prediksi",
+            "analisis", "ramalkan", "estimasi", "simpulkan", "format",
+            "tabel", "grafik", "pola", "rekomendasi", "kesimpulan",
+            "calculate", "explain", "predict", "analyze", "summarize",
+        )
+
+        has_reasoning = any(term in s for term in reasoning_terms)
+
+        # 1. Structural out-of-band attachment evidence
+        if has_attachments:
+            return has_reasoning
+
+        # 2. In-band inline syntactic data payload (compatibility layer)
+        return has_reasoning and self._has_syntactic_data_payload(q)
 
     def _looks_like_external_lookup(self, q: str):
         external_terms = (
@@ -303,7 +371,13 @@ class SemanticRouter:
             "sumber",
             "sources",
             "source",
-            "data",
+            "data empiris",
+            "data statistik",
+            "data sensus",
+            "sumber data",
+            "dataset",
+            "empirical data",
+            "statistical data",
             "statistik",
             "statistics",
             "statistical",
@@ -332,6 +406,8 @@ class SemanticRouter:
             "studi",
             "study",
             "benchmark",
+            "standar industri",
+            "industry standard",
         )
         return any(term in q for term in research_terms)
 

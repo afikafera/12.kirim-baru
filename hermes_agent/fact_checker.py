@@ -9,24 +9,87 @@ logger = logging.getLogger(__name__)
 
 
 def extract_json(text: str):
+    if not isinstance(text, str):
+        return {}
+
+    text_stripped = text.strip()
+    if not text_stripped:
+        return {}
+
+    # 1. Fast path: direct parse
     try:
-        return json.loads(text)
-    except:
+        parsed = json.loads(text_stripped)
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    except Exception:
         pass
-    first_brace = text.find('{')
-    first_bracket = text.find('[')
-    if first_bracket != -1 and (first_brace == -1 or first_bracket < first_brace):
-        patterns = [r'\[.*\]', r'\{.*\}']
-    else:
-        patterns = [r'\{.*\}', r'\[.*\]']
-    for pattern in patterns:
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
+
+    # Markdown fenced block fast path
+    if "```" in text_stripped:
+        m = re.search(r'```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)\s*```', text_stripped, re.IGNORECASE)
+        if m:
+            inner = m.group(1).strip()
             try:
-                return json.loads(match.group())
-            except:
+                parsed = json.loads(inner)
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except Exception:
                 pass
-    return {}
+            try:
+                cleaned_inner = re.sub(r',\s*([\]}])', r'\1', inner)
+                parsed = json.loads(cleaned_inner)
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except Exception:
+                pass
+
+    # 2. Multi-object and bounded extraction via JSONDecoder.raw_decode
+    decoder = json.JSONDecoder()
+    objects = []
+    idx = 0
+    length = len(text)
+
+    while idx < length:
+        next_brace = text.find('{', idx)
+        next_bracket = text.find('[', idx)
+
+        if next_brace == -1 and next_bracket == -1:
+            break
+
+        if next_bracket != -1 and (next_brace == -1 or next_bracket < next_brace):
+            cand_idx = next_bracket
+        else:
+            cand_idx = next_brace
+
+        try:
+            obj, end_pos = decoder.raw_decode(text[cand_idx:])
+            if isinstance(obj, (dict, list)):
+                objects.append(obj)
+            idx = cand_idx + end_pos
+        except Exception:
+            try:
+                cleaned_tail = re.sub(r',\s*([\]}])', r'\1', text[cand_idx:])
+                obj, end_pos = decoder.raw_decode(cleaned_tail)
+                if isinstance(obj, (dict, list)):
+                    objects.append(obj)
+                idx = cand_idx + max(1, end_pos)
+            except Exception:
+                idx = cand_idx + 1
+
+    if not objects:
+        return {}
+
+    if len(objects) == 1:
+        return objects[0]
+
+    # Multiple root objects: preserve all objects in a list, DO NOT overwrite with .update()
+    if all(isinstance(o, list) for o in objects):
+        merged_list = []
+        for o in objects:
+            merged_list.extend(o)
+        return merged_list
+
+    return objects
 
 
 _NUM_PATTERN = re.compile(r'\d+(?:[.,]\d+)?')
@@ -456,7 +519,7 @@ def _normalize_extraction_kvs(all_kvs: dict, all_evidence: list) -> dict:
         if e.get("url")
     }
 
-    root_source = all_kvs.get("source_url") or all_kvs.get("source")
+    root_source = all_kvs.get("source_url") or all_kvs.get("source") or all_kvs.get("url")
     root_source_type = all_kvs.get("source_type", "other")
 
     if not root_source and len(all_evidence or []) == 1 and all_evidence[0].get("url"):
@@ -480,10 +543,18 @@ def _normalize_extraction_kvs(all_kvs: dict, all_evidence: list) -> dict:
 
         if isinstance(value, dict):
             item_dict = dict(value)
-            if not item_dict.get("source") and clean_root_source:
+            item_src = item_dict.get("source") or item_dict.get("source_url") or item_dict.get("url")
+            if item_src:
+                item_dict["source"] = str(item_src).strip()
+            elif clean_root_source:
                 item_dict["source"] = clean_root_source
-            if not item_dict.get("source_type") and clean_root_source and root_source_type:
+
+            item_type = item_dict.get("source_type") or item_dict.get("type")
+            if item_type:
+                item_dict["source_type"] = str(item_type).strip()
+            elif clean_root_source and root_source_type:
                 item_dict["source_type"] = str(root_source_type).strip()
+
             normalized[key] = item_dict
         elif isinstance(value, (str, int, float, bool)) and clean_root_source:
             normalized[key] = {
@@ -764,46 +835,38 @@ or nested:
                     "proceeding with empty facts"
                 )
 
-            # PATCH: normalize list -> dict
-            if isinstance(all_kvs, list):
-                normalized = {}
+            # Candidate stream extraction: preserve all (field_id, fact_data) without premature overwrite
+            candidate_stream = []
 
+            if isinstance(all_kvs, list):
                 for item in all_kvs:
                     if not isinstance(item, dict):
                         continue
-
                     if "field_id" in item:
-                        key = str(item["field_id"])
-                        value = dict(item)
-                        value.pop("field_id", None)
-                        normalized[key] = value
-
+                        k = str(item["field_id"])
+                        v = dict(item)
+                        v.pop("field_id", None)
+                        item_src = v.get("source") or v.get("source_url") or v.get("url")
+                        if item_src:
+                            v["source"] = str(item_src).strip()
+                        candidate_stream.append((k, v))
                     elif "id" in item and "value" in item:
-                        # PATCH 7: the extractor prompt asks for
-                        # {"field_id": {...}}, but a model occasionally
-                        # returns {"id": ..., "value": ..., "source": ...,
-                        # "source_type": ...} instead -- same shape,
-                        # different name for the identifier key. Treat
-                        # it exactly like a "field_id" item rather than
-                        # silently dropping it (proven live: 8/8 facts
-                        # lost this way in trace
-                        # 47b49071d6f3a15665268de66cdb2852).
-                        key = str(item["id"])
-                        value = dict(item)
-                        value.pop("id", None)
-                        normalized[key] = value
-
-                    elif len(item) == 1:
-                        k, v = next(iter(item.items()))
-                        normalized[k] = v
-
-                all_kvs = normalized
-
-            elif not isinstance(all_kvs, dict):
-                all_kvs = {}
-
-            # PATCH 10: normalize flat JSON to canonical nested dicts with provenance guard
-            all_kvs = _normalize_extraction_kvs(all_kvs, all_evidence)
+                        # PATCH 7: {"id": ..., "value": ...} synonym for {"field_id": ...}
+                        k = str(item["id"])
+                        v = dict(item)
+                        v.pop("id", None)
+                        item_src = v.get("source") or v.get("source_url") or v.get("url")
+                        if item_src:
+                            v["source"] = str(item_src).strip()
+                        candidate_stream.append((k, v))
+                    else:
+                        norm_item = _normalize_extraction_kvs(item, all_evidence)
+                        for k, v in norm_item.items():
+                            candidate_stream.append((k, v))
+            elif isinstance(all_kvs, dict):
+                norm_dict = _normalize_extraction_kvs(all_kvs, all_evidence)
+                for k, v in norm_dict.items():
+                    candidate_stream.append((k, v))
 
             # Provenance guard: fact hanya boleh memakai source URL
             # yang benar-benar ada di evidence yang diberikan ke extractor.
@@ -818,12 +881,14 @@ or nested:
                 if e.get("url")
             }
 
-            validated = {}
-            for key, value in all_kvs.items():
+            validated_candidates = []
+            for key, value in candidate_stream:
                 if not isinstance(value, dict):
                     continue
 
-                src = str(value.get("source", "")).strip()
+                src = str(value.get("source") or value.get("source_url") or value.get("url") or "").strip()
+                if src:
+                    value["source"] = src
 
                 logger.info(
                     "[TRACE PROVENANCE] src=%r valid_urls=%r",
@@ -891,8 +956,35 @@ or nested:
 
                 # EXACT / UNAMBIGUOUS_NORMALIZED, or AMBIGUOUS resolved
                 # ACCEPT_CONTEXTUAL by Step 3: fall through to accept.
+                validated_candidates.append((key, value))
 
-                validated[key] = value
+            # Canonical Multi-Source Fact Consolidation:
+            # Consolidate validated candidates into dictionary keyed by field_id.
+            # If multiple valid observations exist for the same field from different sources/times,
+            # retain primary metadata and preserve all distinct observations in a 'sources' list.
+            validated = {}
+            for key, value in validated_candidates:
+                if key not in validated:
+                    fact_copy = dict(value)
+                    fact_copy["sources"] = [dict(value)]
+                    validated[key] = fact_copy
+                else:
+                    existing = validated[key]
+                    existing_sources = existing.setdefault("sources", [dict(existing)])
+                    is_dupe = any(
+                        s.get("source") == value.get("source") and str(s.get("value")) == str(value.get("value"))
+                        for s in existing_sources
+                    )
+                    if not is_dupe:
+                        existing_sources.append(dict(value))
+
+                    # Deterministic freshness preference for primary display
+                    new_ts = value.get("last_updated") or value.get("timestamp")
+                    old_ts = existing.get("last_updated") or existing.get("timestamp")
+                    if new_ts and (not old_ts or str(new_ts) > str(old_ts)):
+                        for k_meta in ("value", "source", "source_type", "last_updated", "timestamp"):
+                            if k_meta in value:
+                                existing[k_meta] = value[k_meta]
 
             all_kvs = validated
 
@@ -914,10 +1006,13 @@ or nested:
             logger.info(f"[extract] {len(all_kvs)} facts: {list(all_kvs.keys())[:20]}")
 
             for f in all_kvs.values():
-                src = f.get("source", "")
-                for e in all_evidence:
-                    if src in e.get("url", ""):
-                        e["had_facts"] = True
+                sources_to_mark = [f.get("source")] + [s.get("source") for s in f.get("sources", [])]
+                for src in sources_to_mark:
+                    if not src:
+                        continue
+                    for e in all_evidence:
+                        if src in e.get("url", ""):
+                            e["had_facts"] = True
 
             return (all_kvs, result)
         except Exception as e:
