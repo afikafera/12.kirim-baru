@@ -39,6 +39,7 @@ from hermes_agent.section_scheduler import SectionScheduler
 from hermes_agent.section_store import SectionStore
 from hermes_agent.section_worker import SectionWorker
 from hermes_agent.coverage_evaluator import CoverageEvaluator
+from hermes_agent.section_splitter import SectionSplitter
 from hermes_agent.outcome_classifier import OutcomeClassifier
 from hermes_agent.continuation_policy import ContinuationPolicy
 from hermes_agent.continuation_engine import ContinuationEngine
@@ -123,6 +124,7 @@ class HermesAgent:
         self.continuation_policy = ContinuationPolicy()
         self.section_worker = SectionWorker(self.llm)
         self.coverage_evaluator = CoverageEvaluator(self.llm)
+        self.section_splitter = SectionSplitter()
 
     def _make_requirement_id(self, topic: str, need: str) -> str:
         return f"{topic} [{need}]"
@@ -2413,16 +2415,226 @@ Return ONLY valid JSON:
                         store_state.status = SectionStatus.FAILED
 
                     elif decision.value == "SPLIT":
-                        # SectionSplitter is not implemented in Stage 7.
-                        # Never silently convert SPLIT into FINALIZE.
-                        logger.warning(
-                            "[OUTPUT SCALING] SPLIT unsupported; degrading "
-                            "section=%s reason=%s",
-                            section.section_id,
-                            step.policy.reason,
+                        # ------------------------------------------------
+                        # In-section composite split.
+                        #
+                        # Children are execution units only.
+                        # They are NOT inserted into the manifest or
+                        # SectionScheduler.
+                        #
+                        # Their output is reconciled into the existing
+                        # parent section state.
+                        # ------------------------------------------------
+
+                        remaining_items = list(
+                            step.coverage.remaining_items
+                            if step.coverage is not None
+                            else store_state.remaining_items
                         )
-                        scheduler.mark_degraded(section.section_id)
-                        store_state.status = SectionStatus.DEGRADED
+
+                        children = self.section_splitter.partition(
+                            section,
+                            remaining_items,
+                        )
+
+                        if not children:
+                            logger.warning(
+                                "[OUTPUT SCALING] SPLIT produced no "
+                                "children section=%s remaining=%s",
+                                section.section_id,
+                                remaining_items,
+                            )
+
+                            scheduler.mark_degraded(
+                                section.section_id
+                            )
+                            store_state.status = (
+                                SectionStatus.DEGRADED
+                            )
+                            store.put(store_state)
+                            continue
+
+                        child_results = []
+
+                        for child in children:
+                            try:
+                                child_result = self.section_worker.execute(
+                                    child.section,
+                                    goal=goal,
+                                    context=section_context,
+                                    temperature=0.3,
+                                    max_tokens=(
+                                        child.section.budget_hint
+                                    ),
+                                )
+
+                                content = child_result.get(
+                                    "content",
+                                    "",
+                                )
+
+                                tokens_output = int(
+                                    child_result.get(
+                                        "tokens_output",
+                                        0,
+                                    )
+                                    or 0
+                                )
+
+                                child_results.append(
+                                    {
+                                        "child_section_id": (
+                                            child.child_section_id
+                                        ),
+                                        "content": content,
+                                        "tokens_output": (
+                                            tokens_output
+                                        ),
+                                        "status": (
+                                            SectionStatus.STORED_FINAL
+                                        ),
+                                        "covered_items": list(
+                                            child.section.must_cover
+                                        ),
+                                    }
+                                )
+
+                                logger.info(
+                                    "[OUTPUT SCALING] split child "
+                                    "complete parent=%s child=%s "
+                                    "tokens=%s",
+                                    section.section_id,
+                                    child.child_section_id,
+                                    tokens_output,
+                                )
+
+                            except Exception as exc:
+                                logger.warning(
+                                    "[OUTPUT SCALING] child split "
+                                    "execution failed parent=%s "
+                                    "child=%s error=%s",
+                                    section.section_id,
+                                    child.child_section_id,
+                                    exc,
+                                )
+
+                                child_results.append(
+                                    {
+                                        "child_section_id": (
+                                            child.child_section_id
+                                        ),
+                                        "content": "",
+                                        "tokens_output": 0,
+                                        "status": (
+                                            SectionStatus.FAILED
+                                        ),
+                                        "covered_items": [],
+                                    }
+                                )
+
+                        reconciled = self.section_splitter.reconcile(
+                            parent_section_id=section.section_id,
+                            child_results=child_results,
+                            remaining_items=remaining_items,
+                        )
+
+                        parent_state = store.get(
+                            section.section_id
+                        )
+
+                        existing_text = (
+                            parent_state.accumulated_text.strip()
+                        )
+
+                        child_text = (
+                            reconciled[
+                                "accumulated_text"
+                            ].strip()
+                        )
+
+                        if existing_text and child_text:
+                            parent_state.accumulated_text = (
+                                f"{existing_text}\n\n{child_text}"
+                            )
+                        elif child_text:
+                            parent_state.accumulated_text = (
+                                child_text
+                            )
+
+                        if child_text:
+                            parent_state.chunks.append(
+                                child_text
+                            )
+
+                        child_tokens = int(
+                            reconciled[
+                                "tokens_output"
+                            ]
+                            or 0
+                        )
+
+                        parent_state.budget_used_tokens += (
+                            child_tokens
+                        )
+
+                        parent_state.last_tokens_output = (
+                            child_tokens
+                        )
+
+                        parent_state.last_outcome = (
+                            step.outcome
+                        )
+
+                        coverage = (
+                            self.coverage_evaluator.evaluate(
+                                section,
+                                parent_state.accumulated_text,
+                                facts=all_facts,
+                            )
+                        )
+
+                        parent_state.covered_items = list(
+                            coverage.covered_items
+                        )
+
+                        parent_state.remaining_items = list(
+                            coverage.remaining_items
+                        )
+
+                        if coverage.semantic_complete is True:
+                            scheduler.mark_complete(
+                                section.section_id
+                            )
+
+                            parent_state.status = (
+                                SectionStatus.STORED_FINAL
+                            )
+
+                            logger.info(
+                                "[OUTPUT SCALING] SPLIT "
+                                "reconciled FINAL section=%s "
+                                "covered=%s",
+                                section.section_id,
+                                parent_state.covered_items,
+                            )
+                        else:
+                            scheduler.mark_degraded(
+                                section.section_id
+                            )
+
+                            parent_state.status = (
+                                SectionStatus.DEGRADED
+                            )
+
+                            logger.warning(
+                                "[OUTPUT SCALING] SPLIT "
+                                "reconciled DEGRADED section=%s "
+                                "remaining=%s",
+                                section.section_id,
+                                parent_state.remaining_items,
+                            )
+
+                        store.put(parent_state)
 
                     else:
                         logger.error(
@@ -2433,7 +2645,8 @@ Return ONLY valid JSON:
                         scheduler.mark_failed(section.section_id)
                         store_state.status = SectionStatus.FAILED
 
-                    store.put(store_state)
+                    if decision.value != "SPLIT":
+                        store.put(store_state)
                     break
 
         aggregated = self.output_aggregator.aggregate(manifest, store)
