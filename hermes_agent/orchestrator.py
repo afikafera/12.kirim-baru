@@ -420,19 +420,45 @@ Return ONLY valid JSON:
                 temperature=0.0,
             )
 
-            raw = result.get("content", "").strip()
+            raw = result.get("content", "").strip() if isinstance(result.get("content"), str) else str(result.get("content") or "")
             parsed = None
+            parse_error = None
 
             try:
                 parsed = json.loads(raw)
-            except Exception:
+            except Exception as e1:
+                parse_error = f"{type(e1).__name__}: {e1}"
                 start = raw.find("{")
                 end = raw.rfind("}")
                 if start >= 0 and end > start:
                     try:
                         parsed = json.loads(raw[start:end + 1])
-                    except Exception:
+                    except Exception as e2:
+                        parse_error += f" | fallback: {type(e2).__name__}: {e2}"
                         parsed = None
+
+            if not isinstance(parsed, dict):
+                content_val = result.get("content") if isinstance(result, dict) else None
+                logger.warning(
+                    "[AUDIT EVALUATOR MALFORMED] topic=%s content_type=%s "
+                    "content_len=%d model=%s finish_reason=%s parse_error=%s snippet=%r",
+                    topic,
+                    type(content_val).__name__,
+                    len(str(content_val or "")),
+                    result.get("model") if isinstance(result, dict) else None,
+                    result.get("finish_reason") if isinstance(result, dict) else None,
+                    parse_error,
+                    str(content_val)[:500] if content_val is not None else None,
+                )
+                print(
+                    f"[AUDIT EVALUATOR MALFORMED] topic={topic!r} "
+                    f"content_type={type(content_val).__name__} "
+                    f"model={result.get('model') if isinstance(result, dict) else None!r} "
+                    f"finish_reason={result.get('finish_reason') if isinstance(result, dict) else None!r} "
+                    f"parse_error={parse_error!r} "
+                    f"raw_snippet={str(content_val)[:500]!r}",
+                    flush=True,
+                )
 
             fulfilled = (
                 isinstance(parsed, dict)

@@ -1345,3 +1345,81 @@ RESULT:
 Endpoint /v1/models kini otomatis merefleksikan seluruh model/provider yang aktif di .env.
 STATUS:
 PATCHED
+
+Stage 7 Output Scaling — In-Section Composite SPLIT
+
+Added
+- Deterministic SectionSplitter.
+- Deterministic child IDs and partition ordering.
+- Child execution without modifying OutputManifest/SectionScheduler.
+- Child output reconciliation into parent runtime state.
+- Unit tests for partition/reconciliation behavior.
+- Direct Stage 7 SPLIT runtime smoke test.
+- Full HermesAgent research E2E verification.
+
+Changed
+- Stage 7 SPLIT no longer degrades immediately.
+- Remaining coverage items are executed as child sections.
+- Child results are reconciled into the parent section.
+- Parent semantic coverage remains evaluated by CoverageEvaluator.
+- Added stale-state overwrite guard so SPLIT reconciliation is not overwritten
+  by the normal continuation state write.
+
+Verification
+- 96/96 regression tests PASS.
+- Direct Stage 7 SPLIT runtime PASS.
+- HermesAgent research E2E PASS.
+- 2/2 manifest sections FINAL.
+- 0 degraded.
+- 0 failed.
+- Scaler status DONE.
+- git diff --cached --check PASS.
+
+Production Evidence Gate
+- No production change.
+- E2E fixture was adjusted to satisfy the existing evidence-validator contract.
+Stage 7 Continuation Termination + Task Planner Producer Contract — 2026-09-22
+
+Fixed
+- ContinuationPolicy no longer continues indefinitely when COMPLETE is
+  reported while coverage remains.
+- When continuation budget is exhausted with multiple remaining coverage
+  items, policy now returns SPLIT.
+- When continuation budget is exhausted with a single remaining item,
+  policy now returns DEGRADE.
+- Stage 7 SPLIT reconciliation remains protected from stale parent-state
+  overwrite.
+
+Task Planner
+- Strengthened the non-comparison deliverable producer contract.
+- Each deliverable must be produced by exactly one knowledge requirement.
+- The same deliverable must not be assigned to multiple requirements for
+  non-comparison goals.
+- Multi-producer deliverables remain permitted only when semantically
+  required by a comparison structure.
+
+Root Cause
+- Duplicate producers in Task Planner output caused PlanValidator I11 to
+  reject the non-comparison plan.
+- Rejection triggered the generic planner fallback containing
+  "question answered", which subsequently created an additional Stage 7
+  requirement.
+- The duplicate-producer root cause is verified from the planner output
+  and PlanValidator source.
+
+Verification
+- ContinuationPolicy targeted tests: 14/14 PASS.
+- Full regression suite: 100/100 PASS.
+- Stage 7 SPLIT runtime verification: PASS.
+- Stage 7 termination behavior: VERIFIED; no infinite continuation observed.
+- Task Planner / PlanValidator regression: 18/18 PASS.
+- task_planner.py py_compile: PASS.
+
+Pending Verification
+- The Task Planner prompt change is patched and regression-tested, but
+  production LLM compliance has not yet been verified.
+- A production TaskPlanner run must confirm that the LLM no longer emits
+  duplicate producers for non-comparison goals.
+
+Housekeeping
+- Patch backups moved from hermes_agent/ into backup/.

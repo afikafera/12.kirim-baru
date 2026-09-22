@@ -282,7 +282,9 @@ Return JSON:
 OUTCOME CONTRACT & DELIVERABLES:
 - Deliverables adalah item data konkret yang menjadi jawaban langsung untuk goal user.
 - Setiap deliverable WAJIB memiliki "id" (snake_case unik), "type" (number|string|boolean|list|object), dan "description".
-- Setiap deliverable WAJIB diproduksi oleh setidaknya satu requirement di "knowledge_required" melalui "produces_deliverable".
+- Untuk NON-COMPARISON goal, setiap deliverable WAJIB diproduksi oleh TEPAT SATU requirement di "knowledge_required" melalui "produces_deliverable".
+- Untuk COMPARISON goal, multi-producer diperbolehkan HANYA jika memang diperlukan secara semantik oleh struktur perbandingan.
+- JANGAN menetapkan deliverable yang sama pada lebih dari satu requirement untuk NON-COMPARISON goal.
 - JANGAN membuat deliverable yang tidak pernah diproduksi oleh requirement manapun.
 
 SUCCESS CRITERIA:

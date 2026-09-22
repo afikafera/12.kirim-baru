@@ -51,9 +51,21 @@ class ContinuationPolicy:
 
         if outcome == OutcomeType.COMPLETE:
             if remaining:
+                if state.continuation_count < section.max_continuations:
+                    return ContinuationPolicyResult(
+                        ContinuationDecision.CONTINUE,
+                        "complete_signal_but_coverage_remaining",
+                    )
+
+                if len(remaining) > 1:
+                    return ContinuationPolicyResult(
+                        ContinuationDecision.SPLIT,
+                        "continuation_budget_exhausted_with_multiple_remaining_items",
+                    )
+
                 return ContinuationPolicyResult(
-                    ContinuationDecision.CONTINUE,
-                    "complete_signal_but_coverage_remaining",
+                    ContinuationDecision.DEGRADE,
+                    "continuation_budget_exhausted_with_remaining_coverage",
                 )
 
             return ContinuationPolicyResult(

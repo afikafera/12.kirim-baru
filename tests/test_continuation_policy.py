@@ -57,6 +57,26 @@ class ContinuationPolicyTests(unittest.TestCase):
 
         self.assertEqual(result.decision, ContinuationDecision.CONTINUE)
 
+    def test_complete_splits_after_continuation_budget(self):
+        result = ContinuationPolicy.decide(
+            self.section,
+            self.state(continuation_count=2),
+            OutcomeType.COMPLETE,
+            self.coverage(["routing", "recovery"]),
+        )
+
+        self.assertEqual(result.decision, ContinuationDecision.SPLIT)
+
+    def test_complete_single_remaining_item_degrades_after_budget(self):
+        result = ContinuationPolicy.decide(
+            self.section,
+            self.state(continuation_count=2),
+            OutcomeType.COMPLETE,
+            self.coverage(["routing"]),
+        )
+
+        self.assertEqual(result.decision, ContinuationDecision.DEGRADE)
+
     def test_truncated_continues_when_budget_available(self):
         result = ContinuationPolicy.decide(
             self.section,
