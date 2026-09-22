@@ -56,11 +56,19 @@ class CoverageEvaluator:
                 reason="evaluator_unavailable",
             )
 
-        result = self._evaluate_with_llm(
-            must_cover=must_cover,
-            accumulated_text=accumulated_text,
-            facts=facts or {},
-        )
+        try:
+            result = self._evaluate_with_llm(
+                must_cover=must_cover,
+                accumulated_text=accumulated_text,
+                facts=facts or {},
+            )
+        except Exception as exc:
+            return CoverageResult(
+                covered_items=[],
+                remaining_items=list(must_cover),
+                semantic_complete=None,
+                reason=f"evaluator_unavailable:{type(exc).__name__}",
+            )
 
         return self._normalize_result(result, must_cover)
 
@@ -111,7 +119,22 @@ Return ONLY valid JSON:
             temperature=0.0,
         )
 
-        return result if isinstance(result, dict) else {}
+        if not isinstance(result, dict):
+            return {}
+
+        content = result.get("content")
+
+        if isinstance(content, str):
+            import json
+
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                return {}
+
+            return parsed if isinstance(parsed, dict) else {}
+
+        return result
 
     @staticmethod
     def _normalize_result(

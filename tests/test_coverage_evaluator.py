@@ -112,6 +112,55 @@ class CoverageEvaluatorTests(unittest.TestCase):
         )
         self.assertIsNone(result.semantic_complete)
 
+    def test_evaluator_exception_fallback(self):
+        class FailingLLM:
+            def analyze(self, **kwargs):
+                raise RuntimeError("upstream provider failed")
+
+        result = CoverageEvaluator(FailingLLM()).evaluate(
+            self.section,
+            "output",
+        )
+
+        self.assertEqual(result.covered_items, [])
+        self.assertEqual(
+            result.remaining_items,
+            self.section.must_cover,
+        )
+        self.assertIsNone(result.semantic_complete)
+        self.assertEqual(
+            result.reason,
+            "evaluator_unavailable:RuntimeError",
+        )
+
+    def test_llm_wrapper_content_json_is_parsed(self):
+        llm = FakeLLM({
+            "content": (
+                '{"covered": ["arsitektur", "routing"], '
+                '"remaining": ["recovery"], '
+                '"semantic_complete": false, '
+                '"reason": "recovery missing"}'
+            ),
+            "model": "test-model",
+            "finish_reason": "stop",
+        })
+
+        result = CoverageEvaluator(llm).evaluate(
+            self.section,
+            "output",
+        )
+
+        self.assertEqual(
+            result.covered_items,
+            ["arsitektur", "routing"],
+        )
+        self.assertEqual(
+            result.remaining_items,
+            ["recovery"],
+        )
+        self.assertFalse(result.semantic_complete)
+        self.assertEqual(result.reason, "recovery missing")
+
     def test_unknown_items_are_not_added(self):
         llm = FakeLLM({
             "covered": ["arsitektur", "unknown"],

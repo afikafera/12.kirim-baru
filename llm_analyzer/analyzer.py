@@ -276,7 +276,13 @@ class LLMAnalyzer:
         t_in = getattr(usage, "prompt_tokens", 0) if usage else 0
         t_out = getattr(usage, "completion_tokens", 0) if usage else 0
 
-        first_choice = response.choices[0]
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise RuntimeError(
+                f"LLM provider '{selected_name}' returned empty or null choices: {response}"
+            )
+
+        first_choice = choices[0]
 
         return {
             "content": first_choice.message.content,
