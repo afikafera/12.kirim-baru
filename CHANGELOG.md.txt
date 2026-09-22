@@ -1415,11 +1415,17 @@ Verification
 - Task Planner / PlanValidator regression: 18/18 PASS.
 - task_planner.py py_compile: PASS.
 
-Pending Verification
-- The Task Planner prompt change is patched and regression-tested, but
-  production LLM compliance has not yet been verified.
-- A production TaskPlanner run must confirm that the LLM no longer emits
-  duplicate producers for non-comparison goals.
+Production LLM Verification
+
+- Production TaskPlanner runtime verification: PASS.
+- Production model: nvidia/nemotron-3-super-120b-a12b:free.
+- planner_fallback: False.
+- Confidence: 0.95.
+- 3 deliverables / 3 requirements.
+- All 3 deliverables have exactly one producer.
+- No duplicate producers detected.
+- PlanValidator accepted the original plan.
+- Production LLM compliance with the single-producer contract: VERIFIED.
 
 Housekeeping
 - Patch backups moved from hermes_agent/ into backup/.
