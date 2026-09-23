@@ -340,7 +340,7 @@ PENTING:
 
 JSON ONLY. Tanpa penjelasan, tanpa markdown block."""
 
-        max_tokens_schedule = [1536, 3072]
+        max_tokens_schedule = [2048, 2048]
         for attempt in range(1, max_attempts + 1):
             attempt_max_tokens = max_tokens_schedule[min(attempt - 1, len(max_tokens_schedule) - 1)]
             try:
@@ -349,6 +349,8 @@ JSON ONLY. Tanpa penjelasan, tanpa markdown block."""
                     "Keluarkan HANYA raw JSON object yang valid. "
                     "DILARANG keras menyertakan markdown code fence seperti ```json atau ```. "
                     "DILARANG menyertakan teks pembuka, penutup, atau analisis di luar JSON. "
+                    "DILARANG menampilkan pemikiran internal, chain-of-thought, reasoning, atau tag <think>. "
+                    "Respons harus langsung dimulai dengan karakter '{' dan diakhiri dengan '}'. "
                     "Format yang valid dimulai dengan '{' dan diakhiri dengan '}'."
                 )
                 user_query = f"{prompt}\n\nReturn HANYA JSON."
