@@ -4,6 +4,13 @@ import urllib.parse
 from urllib.parse import urlparse
 import logging
 import asyncio
+
+from aran_search.fetch_result import (
+    FetchClass,
+    classify_fetch_result,
+    split_http_status,
+    validate_github_response,
+)
 from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO)
@@ -488,30 +495,65 @@ URL: {url}
 
             if "github.com" in url:
                 api_url = url.replace("github.com", "api.github.com/repos").replace("/blob/", "/contents/")
-                result = subprocess.run(["curl", "-s", api_url], capture_output=True, text=True, timeout=10)
-                if result.stdout:
-                    return result.stdout[:2000]
+                result = subprocess.run(
+                    [
+                        "curl", "-sS", "-L",
+                        "-H", "Accept: application/vnd.github+json",
+                        "-w", "\n__FETCH_HTTP_STATUS__:%{http_code}\n",
+                        api_url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                github_body, github_status = split_http_status(
+                    result.stdout or ""
+                )
+                github_ok, github_reason = validate_github_response(
+                    github_body,
+                    github_status,
+                )
+                if github_ok:
+                    return github_body[:2000]
+                return f"Error GitHub: {github_reason}"
 
             result = subprocess.run(
-                ["curl", "-s", "-L", f"https://r.jina.ai/{url}"],
+                [
+                    "curl", "-sS", "-L",
+                    "-w", "\n__FETCH_HTTP_STATUS__:%{http_code}\n",
+                    f"https://r.jina.ai/{url}",
+                ],
                 capture_output=True, text=True, timeout=15
             )
-            if result.stdout and len(result.stdout) > 800:
-                return result.stdout[:8000]
+            jina_body, jina_status = split_http_status(result.stdout or "")
+            jina_class = classify_fetch_result(jina_body, jina_status)
+
+            if jina_class == FetchClass.SUCCESS:
+                return jina_body[:8000]
+
+            browser_classes = {
+                FetchClass.BLOCK,
+                FetchClass.JS_REQUIRED,
+                FetchClass.BROWSER_REQUIRED,
+            }
+            if jina_class not in browser_classes:
+                return f"Error fetch: {jina_class.value}"
 
             logger.info(
-                "[fetch] jina_insufficient url=%s chars=%d; trying browser",
+                "[fetch] browser_fallback url=%s reason=%s",
                 url,
-                len(result.stdout or ""),
+                jina_class.value,
             )
             from agent_reach.browser_tool import BrowserTool
             bt = BrowserTool()
-            browser_result = bt.fetch(url)
+            profile = "github" if "github.com" in url else "default"
+            browser_result = bt.fetch(url, profile=profile)
+            browser_class = classify_fetch_result(browser_result)
 
-            if browser_result:
+            if browser_class == FetchClass.SUCCESS:
                 return browser_result
 
-            return result.stdout or "Tidak ada konten yang berhasil diambil."
+            return f"Error fetch: browser_{browser_class.value}"
 
         except Exception as e:
             return f"Error fetch: {e}"

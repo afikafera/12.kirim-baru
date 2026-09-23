@@ -1,3 +1,18 @@
+## 2026-09-23 — FIX: capability-aware fetch result classification
+
+- Added shared fetch-result classification for Aran Search and Agent-Reach.
+- Added HTTP/status validation and fail-fast handling for 404, auth, network, and GitHub API error responses.
+- Rejects challenge/WAF/JavaScript-required pages before Evidence Pipeline processing.
+- Added bounded browser fallback with validation of browser output.
+- No Hermes/LLM, search expansion, or routing changes.
+
+### Verification
+
+- Focused fetch classifier regression: PASS.
+- py_compile for Aran/Agent-Reach fetch paths: PASS.
+- Stage 7 split runtime: PASS.
+- python3 -m unittest discover tests: 104 tests, OK.
+
 ## 2026-09-05 — FIX: URL extraction trailing delimiter
 
 ### Defect
