@@ -283,9 +283,16 @@ class LLMAnalyzer:
             )
 
         first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        content = getattr(message, "content", None) if message is not None else None
+
+        if content is None:
+            raise RuntimeError(
+                f"LLM provider '{selected_name}' returned null content in message: {response}"
+            )
 
         return {
-            "content": first_choice.message.content,
+            "content": content,
             "model": response.model,
             "requested_model": selected_name,
             "finish_reason": getattr(first_choice, "finish_reason", None),

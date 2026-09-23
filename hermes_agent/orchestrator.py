@@ -129,6 +129,14 @@ class HermesAgent:
     def _make_requirement_id(self, topic: str, need: str) -> str:
         return f"{topic} [{need}]"
 
+    @staticmethod
+    def _resolve_request_fact_req_id(key: str, known_req_ids) -> str | None:
+        matches = [
+            req_id for req_id in known_req_ids
+            if key.startswith(req_id + "/")
+        ]
+        return max(matches, key=len, default=None)
+
     def _extract_memory_intent(self, goal: str):
         prompt = f"""The user gave this instruction to remember something:
 
@@ -867,8 +875,10 @@ Return ONLY valid JSON:
         semantic_completion_cache = {}
 
         def request_requirement_complete(req_id):
-            prefix = f"{req_id}/"
-            return any(key.startswith(prefix) for key in request_facts)
+            return any(
+                self._resolve_request_fact_req_id(key, requirement_map.keys()) == req_id
+                for key in request_facts
+            )
 
         t0_total = time.time()
 
@@ -2175,7 +2185,7 @@ Return ONLY valid JSON:
         _this_request_nodes = set(requirement_map.keys()) | {goal}
         _own = sum(
             1 for k in all_facts
-            if k.split("/", 1)[0] in _this_request_nodes
+            if self._resolve_request_fact_req_id(k, _this_request_nodes) is not None
         )
 
         # AUDIT ONLY: ukur coverage requirement berdasarkan evidence dan facts
