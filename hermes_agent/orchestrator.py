@@ -2402,6 +2402,17 @@ Return ONLY valid JSON:
             "requirement_audit": requirement_audit,
         }
 
+        def _terminal_dependency_coverage(section):
+            covered = set()
+            for dependency_id in section.depends_on:
+                dependency_state = store.get(dependency_id)
+                if (
+                    dependency_state.status
+                    == SectionStatus.STORED_FINAL
+                ):
+                    covered.update(dependency_state.covered_items)
+            return covered
+
         latency.start("output_scaling")
 
         while True:
@@ -2417,6 +2428,25 @@ Return ONLY valid JSON:
                 store_state = store.get(section.section_id)
                 store_state.status = SectionStatus.IN_FLIGHT
                 store.put(store_state)
+
+                required_items = set(section.must_cover)
+                inherited_coverage = _terminal_dependency_coverage(section)
+                if (
+                    required_items
+                    and required_items.issubset(inherited_coverage)
+                ):
+                    logger.info(
+                        "[OUTPUT SCALING] early-pruned section=%s "
+                        "covered_by_terminal_dependencies=%s",
+                        section.section_id,
+                        sorted(inherited_coverage),
+                    )
+                    scheduler.mark_complete(section.section_id)
+                    store_state.status = SectionStatus.STORED_FINAL
+                    store_state.covered_items = list(section.must_cover)
+                    store_state.remaining_items = []
+                    store.put(store_state)
+                    continue
 
                 while True:
                     step = engine.step(
