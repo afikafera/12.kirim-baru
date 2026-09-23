@@ -41,7 +41,10 @@ from hermes_agent.section_worker import SectionWorker
 from hermes_agent.coverage_evaluator import CoverageEvaluator
 from hermes_agent.section_splitter import SectionSplitter
 from hermes_agent.outcome_classifier import OutcomeClassifier
-from hermes_agent.continuation_policy import ContinuationPolicy
+from hermes_agent.continuation_policy import (
+    ContinuationDecision,
+    ContinuationPolicy,
+)
 from hermes_agent.continuation_engine import ContinuationEngine
 from hermes_agent.output_aggregator import OutputAggregator
 from hermes_agent.output_manifest import SectionStatus
@@ -128,6 +131,38 @@ class HermesAgent:
 
     def _make_requirement_id(self, topic: str, need: str) -> str:
         return f"{topic} [{need}]"
+
+    @staticmethod
+    def _canonical_requirement_signature(requirement: dict) -> tuple[str, str]:
+        topic = PlannerContractValidator.normalize_topic(
+            str(requirement.get("topic", ""))
+        )
+        need = " ".join(str(requirement.get("need", "")).split()).casefold()
+        return topic, need
+
+    @staticmethod
+    def _section_has_zero_evidence(
+        section,
+        all_facts: dict,
+        synthesis_evidence: list,
+        requirement_audit: list,
+    ) -> bool:
+        identities = {
+            str(getattr(section, "requirement_id", "")).strip(),
+            str(getattr(section, "title", "")).strip(),
+        }
+        matches = [
+            item for item in (requirement_audit or [])
+            if str(item.get("req_id", "")).strip() in identities
+            or str(item.get("topic", "")).strip() in identities
+        ]
+        if matches:
+            return all(
+                int(item.get("evidence", 0) or 0) == 0
+                and int(item.get("facts", 0) or 0) == 0
+                for item in matches
+            )
+        return not all_facts and not synthesis_evidence
 
     @staticmethod
     def _resolve_request_fact_req_id(key: str, known_req_ids) -> str | None:
@@ -593,6 +628,18 @@ Return ONLY valid JSON:
         """
         Phase 1 Atomic 4-Way State Injection.
         """
+        new_signature = self._canonical_requirement_signature(new_k)
+        if any(
+            self._canonical_requirement_signature(existing) == new_signature
+            for existing in requirement_map.values()
+            if isinstance(existing, dict)
+        ):
+            logger.info(
+                "[CONTROLLER RECOVERY] semantic duplicate rejected topic=%s",
+                new_k.get("topic"),
+            )
+            return None
+
         req_id = self._make_requirement_id(new_k["topic"], new_k["need"])
         if req_id in requirement_map:
             return None
@@ -1320,7 +1367,7 @@ Return ONLY valid JSON:
                     logger.info("[CONTROLLER GATE] no actionable recovery -> graceful incomplete")
                     break
 
-                req_sig = (recovery_k.get("topic"), recovery_k.get("need"))
+                req_sig = self._canonical_requirement_signature(recovery_k)
                 if req_sig in attempted_recovery_sigs:
                     logger.info("[CONTROLLER GATE] duplicate recovery rejected -> graceful incomplete")
                     break
@@ -2462,6 +2509,19 @@ Return ONLY valid JSON:
                     )
 
                     decision = step.policy.decision
+
+                    if self._section_has_zero_evidence(
+                        section,
+                        all_facts,
+                        synthesis_evidence,
+                        requirement_audit,
+                    ):
+                        logger.warning(
+                            "[OUTPUT SCALING] zero-evidence termination "
+                            "section=%s; forcing DEGRADED after one worker",
+                            section.section_id,
+                        )
+                        decision = ContinuationDecision.DEGRADE
 
                     if decision.value == "CONTINUE":
                         continue

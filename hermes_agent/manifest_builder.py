@@ -109,23 +109,30 @@ class ManifestBuilder:
 
                 # Build must_cover list: topic first, followed by produces_deliverable descriptions
                 must_cover: List[str] = []
+                must_cover_keys = set()
+
+                def add_must_cover(value: str) -> None:
+                    value = str(value or "").strip()
+                    key = " ".join(value.split()).casefold()
+                    if value and key not in must_cover_keys:
+                        must_cover.append(value)
+                        must_cover_keys.add(key)
+
                 if topic:
-                    must_cover.append(topic)
+                    add_must_cover(topic)
                 else:
-                    must_cover.append(rid)
+                    add_must_cover(rid)
 
                 raw_produces = item.get("produces_deliverable")
                 if isinstance(raw_produces, list):
                     for p in raw_produces:
                         pid = str(p or "").strip()
                         desc = deliv_map.get(pid) or deliv_map.get(pid.lower()) or pid
-                        if desc and desc not in must_cover:
-                            must_cover.append(desc)
+                        add_must_cover(desc)
                 elif isinstance(raw_produces, str) and raw_produces.strip():
                     pid = raw_produces.strip()
                     desc = deliv_map.get(pid) or deliv_map.get(pid.lower()) or pid
-                    if desc and desc not in must_cover:
-                        must_cover.append(desc)
+                    add_must_cover(desc)
 
                 # Translate depends_on requirements to section_ids
                 raw_deps = item.get("depends_on")
