@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from hermes_agent.continuation_policy import ContinuationPolicy
+from hermes_agent.llm_output_contract import llm_output_failure
 from hermes_agent.output_manifest import OutcomeType
 
 
@@ -73,6 +74,11 @@ class ContinuationEngine:
         """
 
         state = self.store.get(section.section_id)
+        previous_remaining = (
+            frozenset(state.remaining_items)
+            if state.chunks and state.remaining_items
+            else None
+        )
 
         execution_context = dict(context or {})
 
@@ -206,9 +212,17 @@ class ContinuationEngine:
             else None
         )
 
+        no_progress = (
+            previous_remaining is not None
+            and coverage is not None
+            and llm_output_failure(result) is None
+            and previous_remaining == frozenset(coverage.remaining_items)
+        )
+
         outcome = self.outcome_classifier.classify(
             result,
             semantic_complete=semantic_complete,
+            no_progress=no_progress,
         )
 
         self.store.update_metadata(

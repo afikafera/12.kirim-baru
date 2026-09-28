@@ -87,7 +87,7 @@ class ContinuationPolicyTests(unittest.TestCase):
 
         self.assertEqual(result.decision, ContinuationDecision.CONTINUE)
 
-    def test_semantic_incomplete_continues_when_budget_available(self):
+    def test_semantic_incomplete_degrades_when_budget_available(self):
         result = ContinuationPolicy.decide(
             self.section,
             self.state(continuation_count=1),
@@ -95,7 +95,7 @@ class ContinuationPolicyTests(unittest.TestCase):
             self.coverage(["routing"]),
         )
 
-        self.assertEqual(result.decision, ContinuationDecision.CONTINUE)
+        self.assertEqual(result.decision, ContinuationDecision.DEGRADE)
 
     def test_truncated_splits_after_continuation_budget(self):
         result = ContinuationPolicy.decide(
@@ -106,6 +106,16 @@ class ContinuationPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(result.decision, ContinuationDecision.SPLIT)
+
+    def test_semantic_incomplete_degrades_with_multiple_remaining_items_after_budget(self):
+        result = ContinuationPolicy.decide(
+            self.section,
+            self.state(continuation_count=2),
+            OutcomeType.SEMANTICALLY_INCOMPLETE,
+            self.coverage(["routing", "recovery"]),
+        )
+
+        self.assertEqual(result.decision, ContinuationDecision.DEGRADE)
 
     def test_single_remaining_item_degrades_after_budget(self):
         result = ContinuationPolicy.decide(

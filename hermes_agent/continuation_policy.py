@@ -73,10 +73,19 @@ class ContinuationPolicy:
                 "complete_and_coverage_satisfied",
             )
 
-        if outcome in (
-            OutcomeType.TRUNCATED,
-            OutcomeType.SEMANTICALLY_INCOMPLETE,
-        ):
+        if outcome == OutcomeType.SEMANTICALLY_INCOMPLETE:
+            if not remaining:
+                return ContinuationPolicyResult(
+                    ContinuationDecision.FINALIZE,
+                    "incomplete_signal_but_no_coverage_remaining",
+                )
+
+            return ContinuationPolicyResult(
+                ContinuationDecision.DEGRADE,
+                "semantic_coverage_remaining",
+            )
+
+        if outcome == OutcomeType.TRUNCATED:
             if not remaining:
                 return ContinuationPolicyResult(
                     ContinuationDecision.FINALIZE,
