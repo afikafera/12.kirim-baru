@@ -243,10 +243,10 @@ def test_5_real_orchestrator_routes_compatible_capabilities():
             "expected_skill": "agent-reach",
         },
         {
-            "name": "Weather Routing",
+            "name": "Weather Search Query Routing",
             "topic": "Cuaca Bandung Hari Ini",
             "need": "Prakiraan suhu dan kemungkinan hujan",
-            "expected_skill": "weather",
+            "expected_skill": "agent-reach",
         },
     ]
 

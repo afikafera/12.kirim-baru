@@ -321,6 +321,25 @@ RULES:
             if url in fetched
         ]
 
+    @staticmethod
+    def _extract_urls(text: str) -> list[str]:
+        urls = []
+        for candidate in re.findall(r"https?://[^\s<>\"]+", text or ""):
+            candidate = candidate.rstrip(".,;:!*`”’“‘")
+
+            for opening, closing in (("(", ")"), ("[", "]"), ("{", "}")):
+                while (
+                    candidate.endswith(closing)
+                    and candidate.count(closing) > candidate.count(opening)
+                ):
+                    candidate = candidate[:-1]
+
+            candidate = candidate.rstrip(".,;:!*`”’“‘")
+            if candidate:
+                urls.append(candidate)
+
+        return urls
+
     def _get_strategy(self, topic: str, need: str) -> dict:
         cache_key = f"{topic}|{need}"
         if cache_key not in self._strategy_cache:
@@ -1110,7 +1129,7 @@ Return ONLY valid JSON:
         # Preserve URLs explicitly supplied by the user so the research
         # pipeline can fetch the exact target instead of searching for
         # generic methods to access it.
-        direct_urls = re.findall(r'https?://[^\s<>"]+', goal)
+        direct_urls = self._extract_urls(goal)
 
         if direct_urls:
             logger.info(
@@ -1570,8 +1589,12 @@ Return ONLY valid JSON:
                         all_urls,
                     )
 
+                search_skill = self.capability_scheduler.schedule_capability(
+                    Capability.WEB_SEARCH
+                )
+
                 def search_one(q):
-                    if selected_skill is None:
+                    if search_skill is None:
                         logger.warning(
                             "[AUDIT SKILL SELECT] req_id=%s topic=%s "
                             "no_skill_selected query=%s",
@@ -1591,7 +1614,7 @@ Return ONLY valid JSON:
                         )
 
                     results = self.skill_bridge.execute_selected(
-                        selected_skill,
+                        search_skill,
                         q,
                         sources=["searxng"],
                         allow_video=source_policy["allow_video"],
@@ -1624,11 +1647,7 @@ Return ONLY valid JSON:
                     if isinstance(results, str):
                         result_text = results
 
-                        import re
-                        return re.findall(
-                            r'https?://[^\s\n<>"\')\]]+',
-                            result_text,
-                        )
+                        return self._extract_urls(result_text)
 
                     if isinstance(results, dict):
                         result_text = results.get("result", "")
@@ -1636,11 +1655,7 @@ Return ONLY valid JSON:
                         if not isinstance(result_text, str):
                             result_text = str(result_text or "")
 
-                        import re
-                        return re.findall(
-                            r'https?://[^\s\n<>"\')\]]+',
-                            result_text,
-                        )
+                        return self._extract_urls(result_text)
 
                     logger.warning(
                         "[AUDIT SKILL EXEC] req_id=%s query=%s "
