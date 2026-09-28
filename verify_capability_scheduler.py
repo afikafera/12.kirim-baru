@@ -43,6 +43,21 @@ def test_1_resolver_determinism():
         ("Saham BBCA", "dividen dan harga saham", Capability.FINANCIAL),
         ("Bitcoin crypto", "kurs valuation", Capability.FINANCIAL),
         ("GitHub repo hermes-agent", "pull request commit diff", Capability.CODE_SEARCH),
+        (
+            "File searcher.py di repositori GitHub afikafera/12.kirim-baru",
+            "Konten lengkap file searcher.py untuk dianalisis.",
+            Capability.WEB_FETCH,
+        ),
+        (
+            "GitHub repository afikafera/12.kirim-baru",
+            "Analisis implementasi aran_search/searcher.py",
+            Capability.WEB_FETCH,
+        ),
+        (
+            "Repositori GitLab project",
+            "Isi file konfigurasi untuk dianalisis",
+            Capability.WEB_FETCH,
+        ),
         ("General question", "what is photosynthesis", Capability.WEB_SEARCH),
     ]
     for topic, need, expected in cases:

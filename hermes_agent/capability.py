@@ -6,6 +6,7 @@ Requirement(topic + need) -> Capability -> Provider/Skill
 """
 
 import logging
+import re
 from typing import Dict, List, Optional, Set, Any
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,14 @@ class CapabilityResolver:
     )
     FETCH_KEYWORDS = (
         "http://", "https://", "www.", "url", "download", "fetch", "crawl", "baca url",
+        "file content", "raw content", "isi file", "konten file", "konten lengkap",
+        "baca file", "read file",
+    )
+    FILE_TARGET_PATTERN = re.compile(
+        r"\b[\w./-]+\.(?:py|pyi|js|mjs|cjs|ts|tsx|jsx|go|rs|java|c|cc|cpp|cxx|h|hpp|"
+        r"cs|rb|php|sh|bash|zsh|kt|kts|swift|scala|lua|pl|r|sql|zig|ex|exs|erl|hs|"
+        r"md|rst|txt|json|ya?ml|toml|ini|cfg|xml|html|css)\b",
+        re.IGNORECASE,
     )
     FINANCIAL_KEYWORDS = (
         "stock", "saham", "crypto", "bitcoin", "btc", "ihsg", "nasdaq",
@@ -111,10 +120,12 @@ class CapabilityResolver:
             if kw in text:
                 return Capability.WEATHER
 
-        # 2. Direct fetch / URL
+        # 2. Direct fetch / URL / Concrete file content target
         for kw in cls.FETCH_KEYWORDS:
             if kw in text:
                 return Capability.WEB_FETCH
+        if cls.FILE_TARGET_PATTERN.search(text):
+            return Capability.WEB_FETCH
 
         # 3. Financial
         for kw in cls.FINANCIAL_KEYWORDS:

@@ -542,20 +542,52 @@ def _normalize_extraction_kvs(all_kvs: dict, all_evidence: list) -> dict:
             continue
 
         if isinstance(value, dict):
-            item_dict = dict(value)
-            item_src = item_dict.get("source") or item_dict.get("source_url") or item_dict.get("url")
-            if item_src:
-                item_dict["source"] = str(item_src).strip()
-            elif clean_root_source:
-                item_dict["source"] = clean_root_source
+            if "value" in value:
+                item_dict = dict(value)
+                if isinstance(item_dict.get("value"), bool):
+                    item_dict["value"] = str(item_dict["value"])
+                item_src = item_dict.get("source") or item_dict.get("source_url") or item_dict.get("url")
+                if item_src:
+                    item_dict["source"] = str(item_src).strip()
+                elif clean_root_source:
+                    item_dict["source"] = clean_root_source
 
-            item_type = item_dict.get("source_type") or item_dict.get("type")
-            if item_type:
-                item_dict["source_type"] = str(item_type).strip()
-            elif clean_root_source and root_source_type:
-                item_dict["source_type"] = str(root_source_type).strip()
+                item_type = item_dict.get("source_type") or item_dict.get("type")
+                if item_type:
+                    item_dict["source_type"] = str(item_type).strip()
+                elif clean_root_source and root_source_type:
+                    item_dict["source_type"] = str(root_source_type).strip()
 
-            normalized[key] = item_dict
+                normalized[key] = item_dict
+            elif key == "facts" and value:
+                sub_input = dict(value)
+                if clean_root_source and not (
+                    sub_input.get("source_url") or sub_input.get("source") or sub_input.get("url")
+                ):
+                    sub_input["source"] = clean_root_source
+                    sub_input["source_type"] = root_source_type
+                sub_norm = _normalize_extraction_kvs(sub_input, all_evidence)
+                normalized.update(sub_norm)
+            elif value:
+                item_src = value.get("source") or value.get("source_url") or value.get("url")
+                eff_src = str(item_src).strip() if item_src else clean_root_source
+                if not eff_src or eff_src not in valid_urls:
+                    continue
+                item_type = value.get("source_type") or value.get("type") or root_source_type or "other"
+                payload = {k: v for k, v in value.items() if k not in metadata_keys}
+                if not payload:
+                    continue
+                normalized[key] = {
+                    "value": payload,
+                    "source": eff_src,
+                    "source_type": str(item_type).strip(),
+                }
+        elif isinstance(value, list) and value and clean_root_source:
+            normalized[key] = {
+                "value": value,
+                "source": clean_root_source,
+                "source_type": str(root_source_type).strip(),
+            }
         elif isinstance(value, (str, int, float, bool)) and clean_root_source:
             normalized[key] = {
                 "value": str(value),
