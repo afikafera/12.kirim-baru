@@ -2393,6 +2393,15 @@ Return ONLY valid JSON:
         # excerpt only from sources that actually produced facts, so the
         # synthesis prompt is not inflated by duplicate search results.
         synthesis_evidence = [e for e in all_evidence if e.get("had_facts")]
+        unique_synthesis_evidence = []
+        seen_synthesis_urls = set()
+        for evidence in synthesis_evidence:
+            evidence_url = evidence.get("url")
+            if evidence_url in seen_synthesis_urls:
+                continue
+            seen_synthesis_urls.add(evidence_url)
+            unique_synthesis_evidence.append(evidence)
+        synthesis_evidence = unique_synthesis_evidence
         if not synthesis_evidence:
             synthesis_evidence = [
                 {**e, "content": "[content withheld: no verified facts extracted from this source]"}

@@ -693,6 +693,7 @@ class FactChecker:
         num_selected = max(1, len(selected))
         dynamic_limit = self.MAX_EVIDENCE_CHARS // num_selected
         per_source_limit = min(self.MAX_CHARS_PER_SOURCE, dynamic_limit)
+        full_file_limit = 50000
 
         for i, e in enumerate(selected):
             source_type = e.get("evidence_type") or e.get("doc_type") or "other"
@@ -703,12 +704,19 @@ class FactChecker:
 
             raw_content = e.get("content", "")
 
+            # Exact-file evidence bypasses the semantic per-source and aggregate-derived caps.
+            source_limit = (
+                full_file_limit
+                if e.get("preserve_full_file") is True
+                else per_source_limit
+            )
+
             # Jangan potong raw text di tengah baris.
             paragraphs = raw_content.split("\n")
 
             source_text = header
             for p in paragraphs:
-                if len(source_text) + len(p) + 1 <= per_source_limit:
+                if len(source_text) + len(p) + 1 <= source_limit:
                     source_text += p + "\n"
                 else:
                     break

@@ -1444,3 +1444,49 @@ Production LLM Verification
 
 Housekeeping
 - Patch backups moved from hermes_agent/ into backup/.
+
+### Changelog — Exact-File Evidence Pipeline
+
+**Commit:** `fix: preserve exact-file evidence through extraction and synthesis`
+
+#### Area A — Exact-File Fact Extraction
+
+* Menambahkan `full_file_limit=50000` untuk evidence dengan
+  `preserve_full_file=True`.
+* Exact-file evidence tidak lagi terkena batas umum `5.000` karakter pada
+  `FactExtractor`.
+* Behavior evidence web umum tetap menggunakan batas existing.
+
+#### Area B — Synthesis Evidence Deduplication
+
+* Menambahkan deduplikasi `synthesis_evidence` berdasarkan URL setelah
+  filtering `had_facts`.
+* Entry pertama untuk setiap URL dipertahankan beserta metadata-nya.
+* `all_evidence` dan ownership evidence per requirement tidak diubah.
+
+#### Verification
+
+* DocumentIntelligence exact-file: `38,954` → `38,954` chars.
+* Exact-file validator: `ACCEPT`,
+  `reason=preserve_full_file_exact_target`.
+* FactExtractor menerima `38,953` raw source chars setelah normalisasi
+  trailing newline.
+* Bagian akhir `aran_search/searcher.py` tersedia di FactExtractor.
+* Synthesis evidence: `3` → `1` copy untuk URL yang sama.
+* `SOURCE MATERIAL`: `123,952` → `41,284` chars.
+* SectionWorker prompt: `142,190` → `54,161` chars.
+* `py_compile`: **PASS**.
+* Runtime verification PATCH C: **VERIFIED**.
+* Runtime verification PATCH D: **VERIFIED**.
+
+#### Scope
+
+* Perubahan hanya mencakup preservation exact-file pada FactExtractor dan
+  deduplikasi evidence untuk synthesis.
+* `all_evidence` dan requirement-specific evidence ownership tetap
+  dipertahankan.
+* ContinuationEngine multi-pass section duplication belum dipatch dan tetap
+  menjadi pekerjaan audit berikutnya.
+* Runtime PATCH D belum menguji skenario dengan beberapa requirement berbeda
+  yang semuanya menghasilkan `had_facts=True`; runtime terakhir menggunakan
+  planner fallback dengan satu requirement valid.
