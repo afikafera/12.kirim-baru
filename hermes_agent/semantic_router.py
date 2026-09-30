@@ -128,6 +128,16 @@ class SemanticRouter:
                 confidence=0.92,
             )
 
+        if self._is_attachment_reading_intent(
+            q,
+            has_attachments=has_attachments,
+        ):
+            return RouteResult(
+                mode="direct",
+                reason="attachment_reading",
+                confidence=0.95,
+            )
+
         # -------------------------------------------------------------
         # DIRECT REASONING (Zero external dependency)
         # -------------------------------------------------------------
@@ -319,6 +329,37 @@ class SemanticRouter:
             and not self._looks_like_external_lookup(s)
             and not self._looks_like_empirical_research(s)
         )
+
+    def _is_attachment_reading_intent(
+        self,
+        q: str,
+        has_attachments: bool = False,
+    ) -> bool:
+        if not has_attachments:
+            return False
+
+        s = q.lower()
+        attachment_ref_patterns = (
+            r"\b(?:file|berkas)\s+(?:ini|itu|tersebut)\b",
+            r"\b(?:file|berkas)\b.*\b(?:saya|aku|kami)\s+(?:kirim|upload|unggah)\b",
+            r"\b(?:attachment|upload(?:ed)?|unggah(?:an)?)\b",
+            r"\bfile\s+[\w.-]+\.[a-z0-9]{1,8}\b",
+            r"\btrace\b.*\b(?:saya|aku|kami)\s+(?:kirim|upload|unggah)\b",
+        )
+        read_intent_patterns = (
+            r"\b(?:cek|baca|lihat|periksa|inspect)\b",
+            r"\b(?:ringkas|rangkum|summarize|summarise)\b",
+            r"\b(?:analisis|analyze|jelaskan|explain)\b",
+            r"\b(?:isi|content|contents)\b",
+        )
+
+        has_attachment_ref = any(
+            re.search(pattern, s) for pattern in attachment_ref_patterns
+        )
+        has_read_intent = any(
+            re.search(pattern, s) for pattern in read_intent_patterns
+        )
+        return has_attachment_ref and has_read_intent
 
     def _is_self_contained_reasoning(
         self,
