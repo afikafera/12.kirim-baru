@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import sys
 import uuid
@@ -14,8 +14,14 @@ from llm_analyzer.analyzer import LLMAnalyzer
 from outcome_logger.logger import OutcomeLogger
 from lessons_engine.engine import LessonsEngine
 from hermes_agent.orchestrator import HermesAgent
+from api.auth import install_auth
+from api.model_registry import models_response
+from api.ui import install_ui
+from memory_manager.backends.postgres import ConversationNotFoundError
 
 app = FastAPI(title="Technical Research Assistant")
+install_auth(app)
+install_ui(app)
 mm = MemoryManager(config)
 cal = ConfidenceCalibrator(mm)
 llm = LLMAnalyzer(config)
@@ -45,6 +51,21 @@ class ProjectCreate(BaseModel):
     slug: str
     description: str = None
     tags: list = []
+
+
+class ConversationCreateRequest(BaseModel):
+    title: str = "New Chat"
+    model: str = None
+
+
+def _conversation_response(row):
+    return {
+        "id": str(row["id"]),
+        "title": row["title"],
+        "model": row["model"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 @app.get("/")
@@ -121,19 +142,46 @@ def health():
 @app.get("/v1/models")
 @app.get("/models")
 def list_models():
-    model_ids = sorted(llm.providers.keys()) if hasattr(llm, "providers") and llm.providers else ["deepseek-chat"]
+    return models_response(llm.providers)
+
+
+@app.post("/conversations")
+def create_conversation(payload: ConversationCreateRequest, request: Request):
+    title = " ".join((payload.title or "New Chat").split())[:80] or "New Chat"
+    row = mm.create_conversation(request.state.user_id, title, payload.model)
+    return _conversation_response(row)
+
+
+@app.get("/conversations")
+def list_conversations(request: Request):
     return {
-        "object": "list",
         "data": [
-            {"id": model_id, "object": "model"}
-            for model_id in model_ids
+            _conversation_response(row)
+            for row in mm.list_conversations(request.state.user_id)
         ]
+    }
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation(conversation_id: str, request: Request):
+    try:
+        conversation_uuid = uuid.UUID(conversation_id)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    row = mm.get_conversation(request.state.user_id, conversation_uuid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    return {
+        **_conversation_response(row),
+        "messages": mm.list_messages(request.state.user_id, conversation_uuid),
     }
 
 
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
-async def chat_completions(request: dict):
+async def chat_completions(request: dict, http_request: Request):
     messages = request.get("messages", [])
     model = request.get("model")
     print(f"[MODEL] requested={model!r}", flush=True)
@@ -360,6 +408,22 @@ async def chat_completions(request: dict):
     if not conversation_context:
         conversation_context = ""
 
+    owner_user_id = http_request.state.user_id
+    raw_conversation_id = request.get("conversation_id")
+    conversation_uuid = None
+    if raw_conversation_id is not None:
+        try:
+            conversation_uuid = uuid.UUID(str(raw_conversation_id))
+        except (TypeError, ValueError, AttributeError):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if mm.get_conversation(owner_user_id, conversation_uuid) is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+    latest_is_user_message = (
+        isinstance(last_message, dict)
+        and last_message.get("role") == "user"
+    )
+
     print(
         f"[CONTEXT] messages={len(messages)} "
         f"research_chars={len(conversation_context)}",
@@ -381,6 +445,7 @@ async def chat_completions(request: dict):
                 attachments=attachment_bundle["evidence"],
             )
 
+    persist_exchange = result is not None and latest_is_user_message
     if isinstance(result, str):
         result = {
             "goal": "chat",
@@ -396,8 +461,25 @@ async def chat_completions(request: dict):
             "answer": "",
         }
 
+    response_conversation_id = str(conversation_uuid) if conversation_uuid else None
+    if persist_exchange:
+        effective_model = model or llm.default_model
+        title = " ".join(user_msg.split())[:80] or "New Chat"
+        try:
+            saved_conversation = mm.persist_chat_exchange(
+                owner_user_id=owner_user_id,
+                conversation_id=conversation_uuid,
+                title=title,
+                model=effective_model,
+                user_content=raw_user_content,
+                assistant_content=result.get("answer", ""),
+            )
+        except ConversationNotFoundError:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        response_conversation_id = str(saved_conversation["id"])
+
     print(f"[REQ {req_id}] END research", flush=True)
-    return {
+    response_body = {
         "id": result.get("goal", "chat"),
         "object": "chat.completion",
         "model": model or llm.default_model,
@@ -407,3 +489,6 @@ async def chat_completions(request: dict):
             "finish_reason": "stop"
         }]
     }
+    if response_conversation_id is not None:
+        response_body["conversation_id"] = response_conversation_id
+    return response_body

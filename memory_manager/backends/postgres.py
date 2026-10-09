@@ -1,19 +1,36 @@
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 import json
+from contextlib import contextmanager
+from datetime import timedelta
+
+
+class ConversationNotFoundError(Exception):
+    """Raised when a conversation is not owned by the requested identity."""
 
 
 class PostgresBackend:
 
     def __init__(self, config: dict):
-        self.conn = psycopg2.connect(
-            host=config["POSTGRES_HOST"],
-            port=config["POSTGRES_PORT"],
-            dbname=config["POSTGRES_DB"],
-            user=config["POSTGRES_USER"],
-            password=config["POSTGRES_PASSWORD"]
-        )
+        self._connection_params = {
+            "host": config["POSTGRES_HOST"],
+            "port": config["POSTGRES_PORT"],
+            "dbname": config["POSTGRES_DB"],
+            "user": config["POSTGRES_USER"],
+            "password": config["POSTGRES_PASSWORD"],
+        }
+        self.conn = psycopg2.connect(**self._connection_params)
         self.conn.autocommit = True
+
+    @contextmanager
+    def _transaction_connection(self):
+        """Use a request-scoped connection for atomic chat persistence."""
+        conn = psycopg2.connect(**self._connection_params)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def create_project(self, name, slug, description=None, tags=None):
         cur = self.conn.cursor(cursor_factory=RealDictCursor)
@@ -142,6 +159,172 @@ class PostgresBackend:
             (key, v, ttl_seconds, v, ttl_seconds)
         )
         cur.close()
+
+    def create_conversation(self, owner_user_id, title="New Chat", model=None):
+        cur = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cur.execute(
+                """INSERT INTO conversations (owner_user_id, title, model)
+                VALUES (%s, %s, %s) RETURNING *""",
+                (owner_user_id, title or "New Chat", model),
+            )
+            return dict(cur.fetchone())
+        finally:
+            cur.close()
+
+    def list_conversations(self, owner_user_id):
+        cur = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cur.execute(
+                """SELECT * FROM conversations
+                WHERE owner_user_id = %s
+                ORDER BY updated_at DESC, id DESC""",
+                (owner_user_id,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            cur.close()
+
+    def get_conversation(self, owner_user_id, conversation_id):
+        conversation_id = str(conversation_id)
+        cur = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cur.execute(
+                """SELECT * FROM conversations
+                WHERE id = %s AND owner_user_id = %s""",
+                (conversation_id, owner_user_id),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+        finally:
+            cur.close()
+
+    def list_messages(self, owner_user_id, conversation_id):
+        conversation_id = str(conversation_id)
+        cur = self.conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cur.execute(
+                """SELECT m.*
+                FROM messages AS m
+                JOIN conversations AS c ON c.id = m.conversation_id
+                WHERE c.id = %s AND c.owner_user_id = %s
+                ORDER BY m.created_at ASC, m.id ASC""",
+                (conversation_id, owner_user_id),
+            )
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            cur.close()
+
+    @staticmethod
+    def _next_message_timestamp(cur, conversation_id):
+        cur.execute(
+            """SELECT GREATEST(
+                CURRENT_TIMESTAMP::timestamp without time zone,
+                COALESCE(
+                    MAX(created_at) + INTERVAL '1 microsecond',
+                    CURRENT_TIMESTAMP::timestamp without time zone
+                )
+            ) AS next_created_at
+            FROM messages WHERE conversation_id = %s""",
+            (str(conversation_id),),
+        )
+        return cur.fetchone()["next_created_at"]
+
+    def create_message(self, conversation_id, role, content):
+        conversation_id = str(conversation_id)
+        with self._transaction_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                created_at = self._next_message_timestamp(cur, conversation_id)
+                cur.execute(
+                    """INSERT INTO messages (conversation_id, role, content, created_at)
+                    VALUES (%s, %s, %s, %s) RETURNING *""",
+                    (conversation_id, role, Json(content), created_at),
+                )
+                message = dict(cur.fetchone())
+                cur.execute(
+                    """UPDATE conversations SET updated_at = GREATEST(
+                        CURRENT_TIMESTAMP::timestamp without time zone, %s
+                    ) WHERE id = %s""",
+                    (created_at, conversation_id),
+                )
+                if cur.rowcount != 1:
+                    raise ConversationNotFoundError()
+                return message
+
+    def persist_chat_exchange(
+        self,
+        owner_user_id,
+        conversation_id,
+        title,
+        model,
+        user_content,
+        assistant_content,
+    ):
+        """Atomically create/validate a conversation and persist one exchange."""
+        if conversation_id is not None:
+            conversation_id = str(conversation_id)
+        with self._transaction_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if conversation_id is None:
+                    cur.execute(
+                        """INSERT INTO conversations (owner_user_id, title, model)
+                        VALUES (%s, %s, %s) RETURNING *""",
+                        (owner_user_id, title or "New Chat", model),
+                    )
+                    conversation = dict(cur.fetchone())
+                    conversation_id = str(conversation["id"])
+                else:
+                    cur.execute(
+                        """SELECT * FROM conversations
+                        WHERE id = %s AND owner_user_id = %s
+                        FOR UPDATE""",
+                        (conversation_id, owner_user_id),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        raise ConversationNotFoundError()
+                    conversation = dict(row)
+                    if conversation["title"] == "New Chat":
+                        cur.execute(
+                            """SELECT EXISTS (
+                                SELECT 1 FROM messages WHERE conversation_id = %s
+                            ) AS has_messages""",
+                            (conversation_id,),
+                        )
+                        if not cur.fetchone()["has_messages"]:
+                            cur.execute(
+                                """UPDATE conversations SET title = %s
+                                WHERE id = %s AND owner_user_id = %s
+                                RETURNING *""",
+                                (title or "New Chat", conversation_id, owner_user_id),
+                            )
+                            conversation = dict(cur.fetchone())
+
+                user_created_at = self._next_message_timestamp(cur, conversation_id)
+                assistant_created_at = user_created_at + timedelta(microseconds=1)
+                cur.execute(
+                    """INSERT INTO messages (conversation_id, role, content, created_at)
+                    VALUES (%s, %s, %s, %s)""",
+                    (conversation_id, "user", Json(user_content), user_created_at),
+                )
+                cur.execute(
+                    """INSERT INTO messages (conversation_id, role, content, created_at)
+                    VALUES (%s, %s, %s, %s)""",
+                    (conversation_id, "assistant", Json(assistant_content), assistant_created_at),
+                )
+                cur.execute(
+                    """UPDATE conversations
+                    SET model = %s, updated_at = GREATEST(
+                        CURRENT_TIMESTAMP::timestamp without time zone, %s
+                    )
+                    WHERE id = %s AND owner_user_id = %s
+                    RETURNING *""",
+                    (model, assistant_created_at, conversation_id, owner_user_id),
+                )
+                updated = cur.fetchone()
+                if updated is None:
+                    raise ConversationNotFoundError()
+                return dict(updated)
 
     def close(self):
         self.conn.close()

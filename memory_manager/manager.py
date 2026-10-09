@@ -42,6 +42,32 @@ class MemoryManager:
         return self.pg.get_recent_by_project(project_id, limit)
 
     # ==========================================
+    # CHAT CONVERSATIONS
+    # ==========================================
+
+    def create_conversation(self, owner_user_id: str, title: str, model: str = None) -> dict:
+        return self.pg.create_conversation(owner_user_id, title, model)
+
+    def list_conversations(self, owner_user_id: str) -> list:
+        return self.pg.list_conversations(owner_user_id)
+
+    def get_conversation(self, owner_user_id: str, conversation_id) -> dict:
+        return self.pg.get_conversation(owner_user_id, conversation_id)
+
+    def list_messages(self, owner_user_id: str, conversation_id) -> list:
+        return self.pg.list_messages(owner_user_id, conversation_id)
+
+    def create_message(self, conversation_id, role: str, content):
+        return self.pg.create_message(conversation_id, role, content)
+
+    def persist_chat_exchange(
+        self, owner_user_id, conversation_id, title, model, user_content, assistant_content
+    ) -> dict:
+        return self.pg.persist_chat_exchange(
+            owner_user_id, conversation_id, title, model, user_content, assistant_content
+        )
+
+    # ==========================================
     # VECTOR SEARCH
     # ==========================================
 

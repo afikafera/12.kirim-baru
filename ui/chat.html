@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat — ARAN</title>
+  <link rel="stylesheet" href="/static/style.css?v=message-actions-20261009">
+  <script src="/static/chat.js?v=message-actions-20261009" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand">
+        <h1>ARAN</h1>
+        <p>Asisten riset</p>
+      </div>
+      <div class="model-picker" id="model-picker">
+        <button id="model-trigger" class="model-trigger" type="button"
+                aria-haspopup="listbox" aria-expanded="false"
+                aria-controls="model-menu" disabled>
+          <span id="selected-model">Memuat model…</span>
+          <span class="chevron" aria-hidden="true">▾</span>
+        </button>
+        <div id="model-menu" class="model-menu" hidden>
+          <label class="sr-only" for="model-search">Cari model</label>
+          <input id="model-search" type="search" placeholder="Cari model">
+          <ul id="model-options" role="listbox" aria-label="Daftar model"></ul>
+          <p id="model-state" role="status">Memuat daftar model…</p>
+        </div>
+      </div>
+      <div class="account">
+        <span id="identity"></span>
+        <button id="logout" type="button">Keluar</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="sidebar" aria-label="Riwayat percakapan">
+        <button id="new-chat" class="new-chat" type="button">+ New Chat</button>
+        <h2>Chats</h2>
+        <ul id="conversation-list" aria-label="Percakapan tersimpan"></ul>
+        <p id="conversation-state" role="status">Memuat percakapan…</p>
+      </aside>
+
+      <section class="chat-panel" aria-label="Chat ARAN">
+        <main>
+          <p id="empty-state" class="empty-state">Percakapan baru. Tulis pesan untuk memulai.</p>
+          <ol id="messages" aria-label="Percakapan" aria-live="polite"></ol>
+          <p id="status" role="status"></p>
+        </main>
+        <form id="chat-form">
+          <label for="prompt">Pesan</label>
+          <div class="compose">
+            <textarea id="prompt" name="prompt" rows="3" placeholder="Tulis pertanyaan..." required disabled></textarea>
+            <button id="send" type="submit" disabled>Kirim</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </div>
+</body>
+</html>
