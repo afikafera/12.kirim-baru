@@ -127,8 +127,20 @@ Return ONLY valid JSON:
         if isinstance(content, str):
             import json
 
+            normalized_content = content.strip()
+            if (
+                normalized_content.startswith("```")
+                and normalized_content.endswith("```")
+            ):
+                fenced_content = normalized_content[3:-3].strip()
+                language, separator, body = fenced_content.partition("\n")
+                if separator and language.strip().lower() == "json":
+                    normalized_content = body.strip()
+                else:
+                    normalized_content = fenced_content
+
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(normalized_content)
             except json.JSONDecodeError:
                 return {}
 

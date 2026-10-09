@@ -161,6 +161,72 @@ class CoverageEvaluatorTests(unittest.TestCase):
         self.assertFalse(result.semantic_complete)
         self.assertEqual(result.reason, "recovery missing")
 
+    def test_llm_wrapper_content_fenced_json_is_parsed(self):
+        llm = FakeLLM({
+            "content": (
+                "```json\n"
+                '{"covered": ["arsitektur", "routing", "recovery"], '
+                '"remaining": [], '
+                '"semantic_complete": true, '
+                '"reason": "all targets covered"}\n'
+                "```"
+            ),
+            "model": "test-model",
+            "finish_reason": "stop",
+        })
+
+        result = CoverageEvaluator(llm).evaluate(
+            self.section,
+            "output",
+        )
+
+        self.assertEqual(
+            result,
+            CoverageResult(
+                ["arsitektur", "routing", "recovery"],
+                [],
+                True,
+                "all targets covered",
+            ),
+        )
+
+    def test_llm_wrapper_content_plain_fence_is_parsed(self):
+        llm = FakeLLM({
+            "content": (
+                "```\n"
+                '{"covered": ["arsitektur", "routing", "recovery"], '
+                '"remaining": [], '
+                '"semantic_complete": true, '
+                '"reason": "all targets covered"}\n'
+                "```"
+            ),
+        })
+
+        result = CoverageEvaluator(llm).evaluate(
+            self.section,
+            "output",
+        )
+
+        self.assertEqual(result.covered_items, self.section.must_cover)
+        self.assertEqual(result.remaining_items, [])
+        self.assertTrue(result.semantic_complete)
+        self.assertEqual(result.reason, "all targets covered")
+
+    def test_malformed_json_keeps_empty_coverage_fallback(self):
+        for content in ("not-json", "```json\n{broken}\n```"):
+            with self.subTest(content=content):
+                result = CoverageEvaluator(
+                    FakeLLM({"content": content})
+                ).evaluate(self.section, "output")
+
+                self.assertEqual(result.covered_items, [])
+                self.assertEqual(
+                    result.remaining_items,
+                    self.section.must_cover,
+                )
+                self.assertIsNone(result.semantic_complete)
+                self.assertEqual(result.reason, "coverage_evaluated")
+
     def test_unknown_items_are_not_added(self):
         llm = FakeLLM({
             "covered": ["arsitektur", "unknown"],

@@ -790,6 +790,15 @@ RULES:
    facts, return no facts rather than creating facts to fill the output.
 9. Preserve exact numeric values, units, URLs, commands, and technical terms
    from the evidence.
+10. For tabular or sequence-like evidence, use one key per distinct labeled field.
+    Never merge neighboring labels into a composite key or shift a value
+    to a nearby field; align each value only with its explicit label/table
+    position.
+11. Preserve the section context of each fact. Values under a reference-box,
+    example, or other named subsection must remain associated with that context
+    and must not be promoted to a different physical object or specification.
+12. When table alignment is uncertain, retain the source label and context in
+    a separate descriptive field instead of guessing a neighboring label.
 
 EVIDENCE:
 {final_evidence}
