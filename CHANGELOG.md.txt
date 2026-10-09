@@ -1490,3 +1490,59 @@ Housekeeping
 * Runtime PATCH D belum menguji skenario dengan beberapa requirement berbeda
   yang semuanya menghasilkan `had_facts=True`; runtime terakhir menggunakan
   planner fallback dengan satu requirement valid.
+
+### Changelog — `4d1310a`
+
+**Date:** 2026-10-09
+**Commit:** `fix: handle fenced coverage JSON and align extracted facts`
+
+#### PROBLEM
+
+* Coverage output can contain JSON wrapped in Markdown fences. The parser must
+  handle the fenced form while retaining its malformed-JSON fallback.
+* Baseline coverage runtime used `2` worker calls and ended `PARTIAL`; it also
+  reported duplicate coverage item `S001`.
+* FactExtractor alignment could drift between labeled table fields and extracted
+  values, including fields sharing units or nearby reference-box context.
+
+#### HYPOTHESIS
+
+* Parse a fenced JSON object before applying the existing malformed-JSON
+  fallback so valid fenced coverage can be consumed.
+* Require one-to-one alignment with labeled table fields and retain subsection
+  context so neighboring or reference-box values are not assigned to the wrong
+  fact.
+
+#### EVIDENCE
+
+* Baseline coverage runtime: `2` worker calls, `PARTIAL`, duplicate `S001`.
+* Tested coverage runtime: `1` worker call, `DONE`, no duplicate observed.
+* FactExtractor runtime acceptance aligned the requested ACR datasheet values:
+  `No = 1.29%`, `Sd = 514.7 cm²`, `Xmax = 5.65 mm`, and
+  `Berat Speaker = 3.1 kg`.
+* The `15 mm` value was retained in reference-box context and not substituted
+  for `Xmax`.
+
+#### PATCH
+
+* Added handling for Markdown-fenced coverage JSON while retaining the
+  malformed-JSON fallback.
+* Aligned FactExtractor output with labeled table fields and subsection context.
+
+#### TEST
+
+* Relevant Python files `py_compile`: **PASS**.
+* Targeted coverage and FactExtractor alignment tests: **PASS**.
+* Relevant regression tests: **PASS**.
+* Runtime acceptance for FactExtractor alignment: **PASS**.
+* Direct runtime proof that specifically exercises the fenced-JSON parser branch
+  remains **OPEN**; parser behavior and targeted tests are **VERIFIED**.
+
+#### RESULT
+
+* The tested coverage runtime completed with one worker call and `DONE`, with no
+  duplicate `S001` observed.
+* The tested extraction aligned all four requested values and retained `15 mm`
+  in its reference-box context.
+
+#### STATUS = VERIFIED
