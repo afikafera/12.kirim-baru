@@ -1704,3 +1704,22 @@ RESULT: Coding source/offline behavior verified; production activation and live 
 STATUS: PATCHED
 BACKUP: backup/patch_direct_coding_20261016_041251_355156Z/; later test/edge backups remain under backup/.
 NEXT STEP: Obtain approval to restart only hermes.service, then one identical controlled coding UI submit per DeepSeek and9routerpc. Prior two-request tank approval was consumed. No additional live request, restart, configuration change, commit, push or pull was performed for this patch.
+
+## 2026-10-16 — ARAN hardening and development workflow commits
+
+DATE: 2026-10-16
+COMMITS: `904c383` (ARAN research and DIRECT hardening); `b1f319f` (development workflow).
+FILE: Product source and permanent regression tests in `904c383`; `project.md` in `b1f319f`.
+
+PATCH:
+- Hardened SemanticRouter classification of self-contained reasoning versus external lookup: complete-word matching prevents `api` inside `tetapi` from triggering research; temporal/current requests, missing inputs, and fractional outcomes receive explicit handling.
+- Hardened DIRECT answer semantics with bounded provider recovery and deterministic grounding, checked arithmetic, and repair enforcement. Strengthened evidence scenario relevance and planner numeric provenance, including rejection of unsourced numeric attribution.
+- Preserved sourced structured mappings during extraction normalization and improved API/UI reporting of provider failures. Added and updated permanent regression tests under `tests/` for the affected paths.
+- Added `project.md` as the permanent ARAN development workflow: source-first audit and verification before a small patch, central backups in `backup/`, new tests in `tests/`, explicit restart approval, distinct PATCHED / OFFLINE VERIFIED / ACTIVE / LIVE VERIFIED statuses, KG before/after live-acceptance checks, and safe commit/fetch-compare/pull/push procedures.
+
+TEST:
+- Prior feature entries record passing focused offline compile, Python, and UI regression suites. These results are scoped to the tests and features described there; no additional suite was run for this changelog-only update.
+- This entry does not establish new production/UI acceptance, guaranteed provider reliability, or coverage of every environment-specific test.
+
+RESULT: Both commits are present on local `master` and cached `origin/master`. Existing feature-specific runtime and live-acceptance verdicts retain their recorded scope; unobserved acceptance remains OPEN.
+STATUS: Documentation updated; report each product feature's highest proven verification status from its own evidence, without a blanket LIVE VERIFIED claim.
