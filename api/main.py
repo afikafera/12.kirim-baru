@@ -15,7 +15,7 @@ from calibration.calibrator import ConfidenceCalibrator
 from llm_analyzer.analyzer import LLMAnalyzer
 from outcome_logger.logger import OutcomeLogger
 from lessons_engine.engine import LessonsEngine
-from hermes_agent.orchestrator import AranAgent
+from hermes_agent.orchestrator import AranAgent, REQUEST_END_ROUTE
 from hermes_agent.research_status import ensure_research_metadata
 from hermes_agent.direct_provider_recovery import DirectProviderFailure
 from api.auth import install_auth
@@ -426,18 +426,23 @@ async def chat_completions(request: dict, http_request: Request):
     from langfuse import get_client
 
     langfuse = get_client()
-    with langfuse.start_as_current_observation(
-        as_type="span",
-        name="aran-research",
-        input={"request_id": req_id},
-    ):
-        with llm.use_model(model):
-            result = aran.research(
-                user_msg,
-                context=conversation_context,
-                attachments=attachment_bundle["evidence"],
-                request_id=req_id,
-            )
+    route_token = REQUEST_END_ROUTE.set(None)
+    try:
+        with langfuse.start_as_current_observation(
+            as_type="span",
+            name="aran-research",
+            input={"request_id": req_id},
+        ):
+            with llm.use_model(model):
+                result = aran.research(
+                    user_msg,
+                    context=conversation_context,
+                    attachments=attachment_bundle["evidence"],
+                    request_id=req_id,
+                )
+        end_route = REQUEST_END_ROUTE.get()
+    finally:
+        REQUEST_END_ROUTE.reset(route_token)
 
     persist_exchange = result is not None and latest_is_user_message
     if isinstance(result, str):
@@ -473,7 +478,8 @@ async def chat_completions(request: dict, http_request: Request):
             raise HTTPException(status_code=404, detail="Conversation not found")
         response_conversation_id = str(saved_conversation["id"])
 
-    print(f"[REQ {req_id}] END research", flush=True)
+    end_label = "direct" if end_route == "direct" else "research"
+    print(f"[REQ {req_id}] END {end_label}", flush=True)
     response_body = {
         "id": result.get("goal", "chat"),
         "object": "chat.completion",

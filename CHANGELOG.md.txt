@@ -1723,3 +1723,13 @@ TEST:
 
 RESULT: Both commits are present on local `master` and cached `origin/master`. Existing feature-specific runtime and live-acceptance verdicts retain their recorded scope; unobserved acceptance remains OPEN.
 STATUS: Documentation updated; report each product feature's highest proven verification status from its own evidence, without a blanket LIVE VERIFIED claim.
+
+## 2026-10-16 — DIRECT completion end-label observability
+
+DATE: 2026-10-16
+FILE: api/main.py; hermes_agent/orchestrator.py; tests/test_direct_end_label_api.py
+PROBLEM: Successful DIRECT chat requests logged `END research` after grounding accepted, obscuring their actual route.
+PATCH: Carry the selected route in a request-local context variable solely for the successful API end label. DIRECT logs `END direct`; RESEARCH retains `END research`. Existing DIRECT provider/grounding failure labels are unchanged.
+TEST: Before patch, the DIRECT success log assertion failed while RESEARCH, memory, and failure-label checks passed. After patch, Python compile, four targeted tests, and 125 relevant DIRECT/API offline regression tests passed; Git diff whitespace check passed. The disposable-PostgreSQL chat-persistence suite was not run.
+RESULT: After the approved restart of only hermes.service (PID 2778 to 237428), controlled UI request `997b5b9f` used `deepseek-chat`, routed DIRECT, bypassed planner/search, reached grounding `ACCEPT` on attempt 0, returned HTTP 200 with a missing-input `UNKNOWN` answer, and logged `[REQ 997b5b9f] END direct`. Earlier post-restart request `15bb9024` used `9routerpc` and naturally preserved `END direct provider_failure` after an upstream terminal failure; it did not prove the success label. KG `/home/arman/research-assistant/data/knowledge_graph.json` remained unchanged before/after live acceptance: SHA256 `e764b1d6d64459252c9cbe349dfcd32356067213ba1683e05515b49944cc2e06`, 1799 nodes, 2205 edges, 6898 facts, mtime_ns `1792155218823648548`.
+STATUS: LIVE VERIFIED for the DIRECT success end label only. The DIRECT failure label also passed offline tests and was observed for live request `15bb9024`. RESEARCH `END research` is offline verified; no new live RESEARCH request was sent.

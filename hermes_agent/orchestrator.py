@@ -57,6 +57,8 @@ from hermes_agent.output_manifest import SectionStatus
 
 logger = logging.getLogger(__name__)
 
+REQUEST_END_ROUTE = contextvars.ContextVar("aran_request_end_route", default=None)
+
 _WEB_OCR_LOCK = threading.Lock()
 
 
@@ -1098,6 +1100,7 @@ Return ONLY valid JSON:
             has_context=bool(context.strip()),
             has_attachments=bool(attachments),
         )
+        REQUEST_END_ROUTE.set(route.mode)
 
         logger.info(
             "[router] mode=%s reason=%s conf=%.2f",
