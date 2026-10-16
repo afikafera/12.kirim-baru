@@ -1,6 +1,6 @@
 """
 Output Manifest & Section Runtime State Contracts.
-Deterministic, routing-agnostic schemas for Hermes Output Scaling.
+Deterministic, routing-agnostic schemas for ARAN Output Scaling.
 """
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -103,11 +103,13 @@ class SectionRuntimeState:
     remaining_items: List[str] = field(default_factory=list)
     attempts_total: int = 0
     continuation_count: int = 0
+    provider_retry_count: int = 0
     budget_used_tokens: int = 0
     last_model: str = ""
     last_finish_reason: str = ""
     last_tokens_output: int = 0
     last_outcome: Optional[OutcomeType] = None
+    last_failure_subtype: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -140,9 +142,11 @@ class SectionRuntimeState:
             remaining_items=list(data.get("remaining_items", [])),
             attempts_total=int(data.get("attempts_total", 0)),
             continuation_count=int(data.get("continuation_count", 0)),
+            provider_retry_count=int(data.get("provider_retry_count", 0)),
             budget_used_tokens=int(data.get("budget_used_tokens", 0)),
             last_model=str(data.get("last_model", "")),
             last_finish_reason=str(data.get("last_finish_reason", "")),
             last_tokens_output=int(data.get("last_tokens_output", 0)),
             last_outcome=outcome_val,
+            last_failure_subtype=data.get("last_failure_subtype"),
         )

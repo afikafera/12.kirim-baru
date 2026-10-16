@@ -156,6 +156,153 @@ class TaskPlanner:
         self.llm = llm
 
     @staticmethod
+    def _find_unprovided_numeric_claim_fields(plan: dict, goal: str, context: str = "") -> list[str]:
+        """Find numeric claims without matching attribute provenance or a supported derivation."""
+        if not isinstance(plan, dict):
+            return []
+
+        from decimal import Decimal, InvalidOperation
+
+        number_pattern = re.compile(r"(?<![A-Za-z0-9])[-+]?\d+(?:[.,]\d+)*(?![A-Za-z0-9])")
+        formula_pattern = re.compile(
+            r"(?P<left>\d+(?:[.,]\d+)*)(?P<left_label>[^\d=+×xX*÷-]{0,64}?)"
+            r"(?P<op>[×xX*+\-−/÷])\s*(?P<right>\d+(?:[.,]\d+)*)"
+            r"(?P<right_label>[^\d=+×xX*÷-]{0,64}?)=\s*(?P<result>\d+(?:[.,]\d+)*)"
+        )
+        clause_pattern = re.compile(
+            r"(?<=[.!?;])\s+|,\s+|\s+(?:and|or|but|while|whereas|dan|atau|serta|namun|tetapi|sedangkan)\s+|\r?\n+",
+            re.IGNORECASE,
+        )
+        token_pattern = re.compile(r"[^\W\d_]+", re.UNICODE)
+        stop_words = {
+            "a", "an", "the", "each", "every", "per", "for", "of", "to", "from",
+            "with", "and", "or", "is", "are", "was", "were", "has", "have", "had",
+            "by", "on", "in", "at", "as", "assume", "assumed", "assuming", "user",
+            "supplied", "provided", "fact", "value", "calculate", "calculated", "using",
+            "use", "total", "number", "count", "result", "research", "unknown", "source",
+            "evidence", "needed", "based", "there", "be", "it", "this", "that", "what",
+            "how", "do", "does", "dan", "yang", "untuk", "dengan", "adalah", "setiap",
+            "tiap", "jumlah", "hitung", "anggap", "asumsi", "memiliki", "dari", "pada",
+        }
+
+        def number_key(raw: str) -> str:
+            try:
+                return format(Decimal(raw.replace(",", ".")).normalize(), "f")
+            except (InvalidOperation, ValueError):
+                return raw.strip()
+
+        def clauses(text: str) -> list[str]:
+            return [part.strip() for part in clause_pattern.split(str(text or "")) if part.strip()]
+
+        def words(text: str) -> set[str]:
+            result = set()
+            for token in token_pattern.findall(str(text or "").lower()):
+                if token in stop_words:
+                    continue
+                if len(token) > 4 and token.endswith("ies"):
+                    token = token[:-3] + "y"
+                elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+                    token = token[:-1]
+                result.add(token)
+            return result
+
+        def context_matches(source_tokens: set[str], claim_tokens: set[str]) -> bool:
+            if not source_tokens or not claim_tokens:
+                return False
+            overlap = len(source_tokens & claim_tokens)
+            required_overlap = min(2, len(source_tokens), len(claim_tokens))
+            return overlap >= required_overlap
+
+        source_text = f"{goal or ''}\n{context or ''}"
+        source_occurrences = []
+        previous_source_tokens: set[str] = set()
+        for clause in clauses(source_text):
+            source_tokens = words(number_pattern.sub(" ", clause))
+            if re.match(r"\s*(?:each|every|its|their|they|it|setiap|tiap)\b", clause, re.IGNORECASE):
+                source_tokens |= previous_source_tokens
+            for match in number_pattern.finditer(clause):
+                source_occurrences.append((number_key(match.group()), source_tokens))
+            previous_source_tokens = source_tokens
+
+        def supported_derivation(result_key: str, clause: str, claim_tokens: set[str]) -> bool:
+            for match in formula_pattern.finditer(clause):
+                left_key = number_key(match.group("left"))
+                right_key = number_key(match.group("right"))
+                if number_key(match.group("result")) != result_key:
+                    continue
+                try:
+                    left = Decimal(match.group("left").replace(",", "."))
+                    right = Decimal(match.group("right").replace(",", "."))
+                    operation = match.group("op").lower()
+                    if operation in {"x", "×", "*"}:
+                        calculated = left * right
+                    elif operation == "+":
+                        calculated = left + right
+                    elif operation in {"-", "−"}:
+                        calculated = left - right
+                    elif operation in {"/", "÷"} and right != 0:
+                        calculated = left / right
+                    else:
+                        continue
+                except (InvalidOperation, ZeroDivisionError):
+                    continue
+                if number_key(str(calculated)) != result_key:
+                    continue
+                operands_grounded = all(
+                    any(
+                        source_number == operand and context_matches(source_tokens, claim_tokens)
+                        for source_number, source_tokens in source_occurrences
+                    )
+                    for operand in (left_key, right_key)
+                )
+                if operands_grounded:
+                    return True
+            return False
+
+        unsupported_fields = []
+
+        def inspect(field: str, value, anchor: str = "") -> None:
+            if not isinstance(value, str):
+                return
+            for clause in clauses(value):
+                claim_tokens = words(f"{anchor} {number_pattern.sub(' ', clause)}")
+                for match in number_pattern.finditer(clause):
+                    value_key = number_key(match.group())
+                    directly_supported = any(
+                        source_number == value_key and context_matches(source_tokens, claim_tokens)
+                        for source_number, source_tokens in source_occurrences
+                    )
+                    if not directly_supported and not supported_derivation(value_key, clause, claim_tokens):
+                        unsupported_fields.append(field)
+                        break
+                if field in unsupported_fields:
+                    break
+
+        inspect("goal", plan.get("goal"))
+        requirements = plan.get("knowledge_required", [])
+        if isinstance(requirements, list):
+            for index, requirement in enumerate(requirements):
+                if not isinstance(requirement, dict):
+                    continue
+                topic = requirement.get("topic", "")
+                inspect(f"knowledge_required[{index}].topic", topic)
+                inspect(f"knowledge_required[{index}].need", requirement.get("need"), anchor=topic)
+
+        for key in ("constraints", "success_criteria"):
+            values = plan.get(key, [])
+            if not isinstance(values, list):
+                values = [values]
+            for index, value in enumerate(values):
+                if isinstance(value, dict):
+                    for text_key in ("constraint", "criterion", "description", "text"):
+                        inspect(f"{key}[{index}].{text_key}", value.get(text_key))
+                else:
+                    inspect(f"{key}[{index}]", value)
+
+        return list(dict.fromkeys(unsupported_fields))
+
+
+    @staticmethod
     def _normalize_planner_payload(raw) -> dict | None:
         """
         Deterministic, contract-aware payload normalization (P1-A).
@@ -241,6 +388,17 @@ INSTRUCTIONS:
    - Jika goal menyebut sistem spesifik, fokus HANYA pada sistem tersebut.
    - DILARANG menambahkan requirements tentang sub-sistem spekulatif
      yang tidak didukung oleh kata-kata dalam goal.
+
+INPUT FACTS, USER ASSUMPTIONS, AND UNKNOWN PARAMETERS (CRITICAL):
+  - Goal and Context are the only sources of user-supplied facts and values.
+  - Preserve facts and values the user explicitly supplied. Preserve an explicit user assumption as an assumption; do not present it as an externally verified fact.
+  - Never fill a missing parameter with a conventional, typical, or convenient default.
+  - If the requested result depends on a missing parameter, keep its value UNKNOWN or add a specific knowledge_required item to research that parameter from evidence.
+  - A research requirement must name the missing parameter and evidence needed, without asserting a candidate value for it.
+  - Do not introduce unsupplied factual values in the plan goal, requirements, constraints, or success criteria.
+  - Treat every number as an attribute-value pair. A matching numeral attached to a different attribute, unit, or entity is not evidence for the requested parameter.
+  - Preserve the local attribute and unit when reusing a supplied number. If the association is ambiguous, keep the parameter UNKNOWN or request research.
+  - For a numeric derivation, state the named operands, their supplied attributes, the arithmetic expression, and the result together in the same requirement.
 
 SUCCESS CRITERIA GROUNDING RULE:
 - Setiap success criterion harus dapat ditelusuri langsung ke kata-kata dalam goal.
@@ -403,6 +561,27 @@ JSON ONLY. Tanpa penjelasan, tanpa markdown block."""
                     "[PLANNER RAW] %r",
                     candidate_dict if isinstance(raw_content, dict) else raw_content,
                 )
+                unsupported_fields = self._find_unprovided_numeric_claim_fields(
+                    candidate_dict,
+                    goal,
+                    context,
+                )
+                if unsupported_fields:
+                    logger.warning(
+                        "[task_planner] rejected unverified numeric attribution in fields=%s",
+                        unsupported_fields,
+                    )
+                    if attempt == max_attempts:
+                        return self._fallback(goal, context)
+                    prompt += (
+                        "\n\nCORRECTION REQUIRED: The previous plan used numeric values without matching attribute provenance "
+                        "in the Research Goal or Context. Do not treat a value for one field as support for another. Do not treat "
+                        "unsupplied values as defaults or assumptions. Keep the missing "
+                        "parameter UNKNOWN and add a knowledge requirement to research it. "
+                        "Preserve user-supplied facts and explicit user assumptions."
+                    )
+                    continue
+
                 plan = normalize_plan_entity_anchor(candidate_dict, context=context, goal=goal)
                 # Unconditional canonical validation boundary (I12)
                 plan = PlannerContractValidator.validate(plan, goal=goal)

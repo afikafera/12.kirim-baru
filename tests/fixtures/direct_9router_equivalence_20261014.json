@@ -1,0 +1,30 @@
+{
+  "query": "Sebuah kereta memiliki 95 penumpang. Setelah itu jumlah penumpang berkurang setengahnya.\n\nBerapa jumlah penumpang sekarang?\n\nKereta tersebut memiliki beberapa gerbong, tetapi jumlah gerbong dan jumlah roda per gerbong tidak diberikan.\n\nBerapa total roda kereta?",
+  "drafts": [
+    {
+      "request_id": "180e981a",
+      "trace_id": "298c6abd92a7d1bd2442690869cef53d",
+      "observation_id": "b9d23fe351f0a780",
+      "started_utc": "2026-10-14T13:33:27.255Z",
+      "model": "openai/gpt-oss-120b",
+      "content": "{\n  \"facts\": [\n    \"Sebuah kereta memiliki 95 penumpang.\",\n    \"setelah itu jumlah penumpang berkurang setengahnya.\",\n    \"Kereta tersebut memiliki beberapa gerbong, tetapi jumlah gerbong dan jumlah roda per gerbong tidak diberikan.\"\n  ],\n  \"calculations\": [\n    {\n      \"expression\": \"95 / 2\",\n      \"result\": \"47.5\"\n    }\n  ],\n  \"unknowns\": [\n    \"jumlah gerbong\",\n    \"jumlah roda per gerbong\"\n  ],\n  \"examples\": []\n}"
+    },
+    {
+      "request_id": "eb77832b",
+      "trace_id": "b4119d6cba8b18e1850b07860f387dde",
+      "observation_id": "330273564c9fcfa7",
+      "started_utc": "2026-10-14T13:33:05.768Z",
+      "model": "openai/gpt-oss-120b",
+      "content": "{\n  \"facts\": [\n    \"Sebuah kereta memiliki 95 penumpang.\",\n    \"Setelah itu jumlah penumpang berkurang setengahnya.\",\n    \"Kereta tersebut memiliki beberapa gerbong, tetapi jumlah gerbong dan jumlah roda per gerbong tidak diberikan.\"\n  ],\n  \"calculations\": [\n    {\n      \"expression\": \"95 / 2\",\n      \"result\": \"47.5\"\n    }\n  ],\n  \"unknowns\": [\n    \"jumlah gerbong\",\n    \"jumlah roda per gerbong\"\n  ],\n  \"examples\": []\n}"
+    },
+    {
+      "request_id": "eb77832b",
+      "trace_id": "b4119d6cba8b18e1850b07860f387dde",
+      "observation_id": "cbe49ccde2a03cc3",
+      "started_utc": "2026-10-14T13:32:59.176Z",
+      "model": "poolside/laguna-xs-2.1",
+      "content": "{\"facts\": [\"Sebuah kereta memiliki 95 penumpang.\", \"Setelah itu jumlah penumpang berkurang setengahnya.\", \"Kereta tersebut memiliki beberapa gerbong, tetapi jumlah gerbong dan jumlah roda per gerbong tidak diberikan.\"], \"calculations\": [{\"expression\": \"95 / 2\", \"result\": \"47.5\"}], \"unknowns\": [\"jumlah gerbong\", \"jumlah roda per gerbong\"], \"examples\": []}"
+    }
+  ],
+  "retrieval": "Existing Langfuse v2 observations; no model call"
+}

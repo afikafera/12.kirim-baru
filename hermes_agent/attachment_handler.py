@@ -2,6 +2,7 @@ import base64
 import binascii
 import io
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -97,33 +98,8 @@ def collect_attachments(message: dict, context_messages: list | None = None) -> 
                 if file_type == "image" or content_type.startswith("image/"):
                     image_urls.append(url.strip())
 
-    # Open WebUI commonly places extracted attachment context in a system message.
-    # Only the explicit source_context payload is imported; the surrounding
-    # system prompt is never treated as attachment evidence.
-    context_messages = context_messages or []
-    context_candidates = [
-        message for message in context_messages
-        if isinstance(message, dict)
-        and isinstance(message.get("content", ""), str)
-        and "<source_context>" in message.get("content", "")
-    ]
-    if context_candidates:
-        raw = context_candidates[-1]["content"]
-        marker = "<source_context>"
-        end_marker = "</source_context>"
-        start = 0
-        while True:
-            pos = raw.find(marker, start)
-            if pos < 0:
-                break
-            end = raw.find(end_marker, pos + len(marker))
-            if end < 0:
-                break
-            value = raw[pos + len(marker):end].strip()
-            if value:
-                text_parts.append(value)
-            start = end + len(end_marker)
-
+    # Conversation context is not attachment evidence. Explicit file-level
+    # content, text, and source_context fields were handled above.
     ocr_parts = []
     resolved_images = []
 
@@ -165,6 +141,65 @@ def collect_attachments(message: dict, context_messages: list | None = None) -> 
             "evidence_type": "user_attachment",
             "source_type": "user_attachment",
         })
+
+    # Provenance-bearing <source> blocks from context_messages (Open WebUI RAG file uploads)
+    if context_messages and isinstance(context_messages, list):
+        source_pattern = re.compile(r"<source>(.*?)</source>", re.DOTALL | re.IGNORECASE)
+        type_pattern = re.compile(r"<source_type>(.*?)</source_type>", re.DOTALL | re.IGNORECASE)
+        name_pattern = re.compile(r"<source_name>(.*?)</source_name>", re.DOTALL | re.IGNORECASE)
+        context_pattern = re.compile(r"<source_context>(.*?)</source_context>", re.DOTALL | re.IGNORECASE)
+
+        existing_evidence_texts = set(p.strip() for p in text_parts if p.strip())
+        provenance_text_parts = []
+
+        for ctx_msg in context_messages:
+            if not isinstance(ctx_msg, dict):
+                continue
+            ctx_content = ctx_msg.get("content", "")
+            if not isinstance(ctx_content, str) or "<source>" not in ctx_content:
+                continue
+
+            for block_match in source_pattern.finditer(ctx_content):
+                block = block_match.group(1)
+                type_match = type_pattern.search(block)
+                if not type_match:
+                    continue
+                src_type = type_match.group(1).strip().lower()
+
+                # ONLY "file" provenance is eligible as user attachment evidence
+                if src_type != "file":
+                    continue
+
+                ctx_match = context_pattern.search(block)
+                if not ctx_match:
+                    continue
+                source_context = ctx_match.group(1).strip()
+                if not source_context:
+                    continue
+
+                # Rule 6: Avoid duplicate evidence if same content already in message["files"]
+                if source_context in existing_evidence_texts:
+                    continue
+                existing_evidence_texts.add(source_context)
+                provenance_text_parts.append(source_context)
+
+                name_match = name_pattern.search(block)
+                source_name = name_match.group(1).strip() if name_match else ""
+                attachment_url = (
+                    f"openwebui://attachment/{source_name}"
+                    if source_name
+                    else "openwebui://attachment/file"
+                )
+
+                evidence.append({
+                    "url": attachment_url,
+                    "content": source_context,
+                    "doc_type": "user_attachment",
+                    "evidence_type": "user_attachment",
+                    "source_type": "user_attachment",
+                })
+
+        text_parts.extend(provenance_text_parts)
 
     logger.info(
         "[ATTACHMENT AUDIT] text=%d images=%d resolved_images=%d evidence=%d",

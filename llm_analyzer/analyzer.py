@@ -52,7 +52,7 @@ class LLMAnalyzer:
 
             suffix = key[len(prefix):]
 
-            for field in ("_API_KEY", "_BASE_URL", "_MODEL", "_ALIASES"):
+            for field in ("_API_KEY", "_BASE_URL", "_MODEL", "_ALIASES", "_MULTI_MODEL_ROUTER"):
                 if suffix.endswith(field):
                     name = suffix[:-len(field)]
                     if name:
@@ -89,6 +89,9 @@ class LLMAnalyzer:
                 "base_url": base_url,
                 "model": model,
                 "aliases": aliases,
+                "multi_model_router": str(
+                    config.get(f"{prefix}{name}_MULTI_MODEL_ROUTER", "")
+                ).strip().lower() in {"1", "true", "yes", "on"},
             }
 
         # Legacy LLM config fallback.
@@ -97,6 +100,9 @@ class LLMAnalyzer:
                 "api_key": config.get("LLM_API_KEY"),
                 "base_url": config["LLM_BASE_URL"],
                 "model": config.get("LLM_MODEL"),
+                "multi_model_router": str(
+                    config.get("LLM_MULTI_MODEL_ROUTER", "")
+                ).strip().lower() in {"1", "true", "yes", "on"},
             }
 
         # Legacy DeepSeek config fallback.
@@ -111,6 +117,7 @@ class LLMAnalyzer:
                     "DEEPSEEK_MODEL",
                     "deepseek-chat",
                 ),
+                "multi_model_router": False,
             })
 
         return providers
@@ -150,6 +157,15 @@ class LLMAnalyzer:
             )
 
         return provider_name, provider
+
+    def get_requested_model(self, model=None):
+        """Return the selected model alias without resolving its upstream."""
+        return model or self._request_model.get() or self.default_model
+
+    def is_multi_model_router(self, model=None):
+        """Return the explicit router/pool capability for the selected provider."""
+        _, provider = self._get_provider(model)
+        return provider.get("multi_model_router") is True
 
     @contextmanager
     def use_model(self, model):

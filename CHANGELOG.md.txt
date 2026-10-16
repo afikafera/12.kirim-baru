@@ -1445,6 +1445,41 @@ Production LLM Verification
 Housekeeping
 - Patch backups moved from hermes_agent/ into backup/.
 
+### Changelog — `d1be4d7`
+
+**Commit:** `fix: route file targets and preserve structured facts`
+
+#### Area B — Capability Routing
+
+* Menambahkan routing eksplisit untuk kebutuhan **file content/raw content** ke `WEB_FETCH`.
+* Menambahkan `FILE_TARGET_PATTERN` untuk mengenali target file konkret seperti `.py`, `.js`, `.json`, `.yaml`, `.md`, dan format kode/dokumen lainnya.
+* Mencegah kebutuhan analisis file konkret salah diarahkan ke `CODE_SEARCH`.
+* Menambahkan **3 regression cases** untuk GitHub/GitLab file-content routing.
+
+#### Area C — Structured Fact Preservation
+
+* Mempertahankan extraction berbentuk **list** sebagai fact canonical.
+* Mempertahankan **structured dict** tanpa key `value`.
+* Menambahkan provenance validation terhadap `source/source_url/url`.
+* Mempertahankan nested `facts` melalui normalisasi rekursif.
+* Mengonversi boolean canonical `value` menjadi string (`False` → `"False"`).
+* Mempertahankan struktur list/dict seperti `imports`, `external_dependencies`, `class_constant_subdomain_rules`, dan `method_fetch_url`.
+* Menolak structured facts yang berasal dari URL yang tidak terverifikasi.
+
+#### Verification
+
+* Capability Scheduler: **5/5 PASS**
+* Extraction Normalizer: **8/8 PASS**
+* FactExtractor contract: **14/14 PASS**
+* `py_compile`: **PASS**
+* `git diff --cached --check`: **PASS**
+* Independent Codex review: **READY**
+* Independent Claude/Sentinel review: **READY**
+
+#### Scope
+
+Perubahan `extract_facts_batch()` terkait klasifikasi `"traceback"` **tidak dimasukkan** ke commit ini dan tetap berada di working tree. Ini sengaja dipisahkan sebagai pekerjaan berikutnya.
+
 ### Changelog — Exact-File Evidence Pipeline
 
 **Commit:** `fix: preserve exact-file evidence through extraction and synthesis`
@@ -1546,3 +1581,126 @@ Housekeeping
   in its reference-box context.
 
 #### STATUS = VERIFIED
+
+
+### SemanticRouter — temporal arithmetic routing (2026-10-11)
+
+**Status: VERIFIED**
+
+* Baseline: exact train arithmetic and 5+5 sekarang routed to RESEARCH;
+  the current gold-price query routed to RESEARCH as expected.
+* Updated direct routing to recognize numeric arithmetic word problems and a
+  temporal suffix on a complete arithmetic expression.
+* The external lookup signal for sekarang remains active for genuine current
+  fact requests and is suppressed only for a detected arithmetic word problem
+  when it is the sole external lookup match.
+* Verification: targeted routing cases 8/8 PASS; existing router matrix
+  21/21 PASS; required post-runtime regression cases 5/5 PASS;
+  py_compile PASS.
+* One controlled in-process AranAgent.research call used a scripted LLM.
+  Router mode was DIRECT; planner, search, fetch, FactExtractor, and KG
+  constructor counts were zero. KG fingerprint was unchanged.
+* No HTTP/API, provider, or web request was sent.
+
+### Direct answer semantics (2026-10-11)
+
+**Status: VERIFIED — DIRECT PROMPT CONTRACT**
+
+* The direct prompt now permits deterministic arithmetic only from supplied facts, requires missing inputs to remain undetermined, limits external knowledge to explicit research requests, and flags non-integer results for discrete entities without rounding.
+* Verification: `python3 -m py_compile hermes_agent/orchestrator.py` PASS; `tests.test_direct_answer_semantics` 7/7 PASS; in-process exact train query used one scripted LLM call with planner, search, fetch, FactExtractor, and KG traps all at zero.
+* Router regression cases, including explicit external wheel-count research, PASS.
+* Provider behavior remains unverified because no provider request was sent. The isolated missing-input/fractional tests force DIRECT; current router routes those query forms to RESEARCH, outside this change's scope.
+
+### Evidence relevance — scenario context validation (2026-10-11)
+
+**Status: VERIFIED — NORMAL SEARCH PATH; `preserve_full_file` BYPASS OPEN**
+
+* Baseline reproduced the false acceptance: same-scenario evidence and same-context partial evidence were accepted, but a different-scenario source sharing only the carriage component was also accepted (`partial carriage component overlap`).
+* The relevance contract now requires subject/entity/scenario/context alignment when the requirement identifies it, then permits partial support within that aligned context.
+* The isolated search/fetch pipeline accepted two same-scenario partial sources (official documentation + datasheet), rejected the StudyX-like different-scenario source, passed only the accepted two documents to FactExtractor, and reached 100% scripted coverage from their facts. With only the mismatched source, FactExtractor ran zero times and the requirement remained incomplete.
+* Verification: new relevance tests 7/7 PASS; relevance contract tests 12/12 PASS; router suites 8/8, 3/3, and 21/21 PASS; direct semantics 7/7 PASS; `py_compile` PASS; `git diff --check` PASS.
+* The pre-existing `preserve_full_file=True` branch accepts before the relevance prompt (orchestrator.py:840-851); that alternate path was not exercised by the normal fetched-document trace and remains OPEN.
+* All LLM, search, and fetch responses in the acceptance harness were scripted. Production provider behavior remains unverified; no web/provider request was sent.
+
+### Planner unsourced-numeric guard verification (2026-10-12)
+
+**PLANNER RAW ASSUMPTION — FIRST DIVERGENCE PROVEN**
+
+* The correlated raw planner output introduced an unsupplied wheel-count value before normalization or coverage evaluation.
+
+**UNSOURCED NUMERIC GUARD — VERIFIED FOR NOVEL INPUT-ABSENT NUMBERS**
+
+* Offline scripted planner guard tests pass 5/5 after restoring the patched source. An unsupported numeric candidate is rejected, a corrected unknown/research requirement is accepted and reaches search strategy, explicit user assumptions and complete inputs are preserved, and external facts remain research requirements.
+* This verification covers numeric literals absent from the full Goal/Context text; it does not establish semantic provenance for numbers that appear elsewhere in that text.
+
+**VALIDATOR IDEMPOTENCE — PRE-EXISTING / UNRELATED**
+
+* `test_planner_validator_idempotence.py` fails byte-for-byte identically with pre-patch and patched `task_planner.py`, while the same dirty `plan_validator.py` remains unchanged. The failure is not caused by the planner patch.
+
+**SEMANTIC NUMERIC PROVENANCE — OPEN**
+
+* Diagnostic reproduced acceptance of “80 wheels per carriage” when the user input contains the unrelated value “80 km/h”. The current membership guard permits this semantic misattribution; no fix was made in this verification.
+
+**STATUS: VERIFIED — PLANNER UNSOURCED-NUMERIC GUARD; SEMANTIC NUMERIC PROVENANCE OPEN**
+
+
+## 2026-10-14 — DIRECT provider failure recovery
+
+DATE: 2026-10-14
+FILE: hermes_agent/direct_provider_recovery.py; hermes_agent/orchestrator.py; api/main.py; ui/static/chat.js; tests/test_direct_provider_recovery.py; tests/test_direct_provider_api.py; tests/test_direct_provider_ui.js
+PROBLEM: DIRECT request 5ca1b5d9 reached the correct route but an upstream 9Router capacity failure with null choices escaped as HTTP 500.
+HYPOTHESIS: DIRECT lacks the bounded provider-failure handling used by RESEARCH workers.
+EVIDENCE: Runtime trace at orchestrator.analyze, analyzer RuntimeError; offline reproduction fails after one call although a second call is scripted to succeed, with zero research/KG calls.
+PATCH: DIRECT-only helper permits one retry for explicitly multi-model routers on recognized transient/network/null failures, with unchanged prompt/context/attachments/model alias and one-second delay. DeepSeek is not rotated or retried by this helper. Known terminal and invalid-type failures are not retried; unknown programming errors remain visible. API returns safe structured DIRECT errors (503 exhausted, 400 invalid input, 502 other terminal/output failures); UI retains prompt/history and shows fixed provider messages.
+TEST: Python/JS syntax PASS; 53 Python tests PASS across new recovery/API, existing direct/router, API compatibility/research contract, provider retry scope/subtype suites. New UI five scenarios PASS; existing conversation sidebar suite PASS. Tests use mocked providers/ASGI/DOM; no new live provider request.
+RESULT: Offline recovery/exhaustion contract and regressions PASS. Authorized hermes.service restart activated PID119961. One live UI submit (API 59039f59, event 7ec889a1c05b) completed DIRECT with HTTP200, one ARAN LLM call, upstream poolside/laguna-s-2.1, zero research stages and unchanged KG. No live retry was needed; failure/retry behavior is verified by isolated tests only. Answer-quality limitation remains OPEN: model added unsupported 4-wheels-per-carriage / 8-wheels assumptions despite the existing DIRECT prompt.
+STATUS: VERIFIED
+
+
+## 2026-10-14 — Router external keyword boundaries
+DATE: 2026-10-14
+FILE: hermes_agent/semantic_router.py; tests/test_semantic_router_term_boundaries.py
+PROBLEM: The supplied 95-passenger/missing-carriage-input query incorrectly entered RESEARCH because api matched inside tetapi.
+HYPOTHESIS: Substring-based external keyword matching overrides otherwise self-contained arithmetic.
+EVIDENCE: Active source hash 5416fcb89be36bdfe851de189db4e79f01925fc3c06fb6bd9450ee1635fa19b8; offline exact query yielded research_required while self_contained=True. New tests reproduced 19 assertion/subtest failures before patch.
+PATCH: Complete Unicode word boundaries for external terms, whitespace-aware phrases, case-insensitive matching, and preserved English plurals APIs/prices/reviews/releases/specifications. Research precedence remains unchanged.
+TEST: Python syntax PASS; 21 router, 53 DIRECT/grounding/provider API, 5 research API, 6 OpenAI compatibility, 5 provider retry scope, 6 failure subtype tests PASS (96 total). Exact query changes RESEARCH to DIRECT; genuine API lookup remains RESEARCH. No live provider call in this patch audit.
+RESULT: User explicitly approved activation and one DeepSeek acceptance. hermes.service restarted to PID434547. Exact query accepted as DIRECT with HTTP200 (API a0f4a99a, event 189e7735d734), one deepseek-flash call, grounding ACCEPT without repair, literal result 47.5 plus discrete-count inconsistency, and UNKNOWN for carriage count/wheels per carriage. No planner/search/fetch/FactExtractor/KG calls. One preliminary UI submit was rejected by auth with HTTP401 before any model call; after login, one request was processed. KG/hash/mtime and protected related sources unchanged.
+STATUS: VERIFIED
+
+## 2026-10-14 — DIRECT proof equivalence
+DATE: 2026-10-14
+FILE: hermes_agent/direct_answer_grounding.py; tests/test_direct_grounding_equivalence.py; tests/fixtures/direct_9router_equivalence_20261014.json
+PROBLEM: DIRECT 9Router requests eb77832b and 180e981a returned generic UNKNOWN despite correct 95 / 2 = 47.5 arithmetic and named missing wheel inputs.
+HYPOTHESIS: The validator rejects source-backed half expressed as literal division by two, and rejects a case-only quote difference.
+EVIDENCE: Existing Langfuse observations b4119d6cba8b18e1850b07860f387dde and 298c6abd92a7d1bd2442690869cef53d contain three successful generation drafts with expression 95 / 2, result 47.5. The second request quote begins lowercase setelah while the exact input begins Setelah. Journal reasons are unsupplied_operand and unsupported_fact. Before patch, captured replay and generic equivalence tests reproduced eight failing assertions/subtests; pre-existing grounding/API tests passed.
+PATCH: Accept only a literal denominator of numeric value two as the already permitted half operation when user-supplied input explicitly says half/setengah; other missing numeric literals remain rejected. Restore an unambiguous case-only excerpt match to its exact source spelling before rendering; paraphrases, ambiguous matches, altered punctuation/spacing, unsupplied wheel facts, and incorrect arithmetic remain rejected. No changes to router, provider selection/retry, API/UI, or RESEARCH.
+TEST: Service interpreter py_compile PASS. 114 offline Python tests PASS: new captured/generic/API equivalence, existing DIRECT/grounding/provider/API, router, research API, OpenAI compatibility, provider retry scope, and failure subtype suites. Three captured drafts render 47.5, discrete-count inconsistency, and both named wheel UNKNOWNs on the first scripted generation; DIRECT research/KG traps remain zero. Tests are mocked; no new live provider request.
+RESULT: Explicitly authorized hermes.service restart at 2026-10-14 13:59:34 UTC activated PID548907, one instance. One accepted UI request 5416ec06 at 14:01:09 UTC / 21:01:09 WIB completed HTTP200, DIRECT/self_contained_reasoning, one 9routerpc/opencode_free generation with concrete model @cf/meta/llama-3.3-70b-instruct-fp8-fast, grounding ACCEPT attempt0, no repair/retry. Raw live observation 4bc903d75f22f1fe / trace 460a5add93f02dda3810bb007c4d1a39 contains literal 95 / 2 = 47.5, directly exercising the patched half-division branch. UI preserves 47.5, discrete-count inconsistency, and named unknown carriage count/wheels per carriage. KG hash/count/mtime unchanged; no research stages. One preliminary UI submit expired with HTTP401 before any request/model execution; after normal login exactly one request was processed. Case-only normalization is verified by captured offline replay; this live output used source-exact excerpts. Acceptance is VERIFIED for this controlled query and observed upstream, not every possible 9Router combo member.
+STATUS: VERIFIED
+
+## 2026-10-16 — DIRECT calculation plans and honest failure outcomes
+DATE: 2026-10-16
+FILE: hermes_agent/direct_contract.py; hermes_agent/direct_calculation.py; hermes_agent/direct_answer_grounding.py; hermes_agent/direct_provider_recovery.py; ui/static/chat.js; tests/test_direct_calculation_plans.py; tests/test_direct_tank_replay.py; tests/test_direct_output_ui.js; tests/fixtures/direct_tank_live_20261014.json; tests/test_direct_answer_grounding.py; tests/test_direct_grounding_api.py; tests/test_direct_grounding_equivalence.py; tests/test_direct_provider_ui.js
+PROBLEM: Tank request aaa56a6b had truncated/fenced JSON followed by structured content and ended HTTP200 UNKNOWN, incorrectly presenting a provider/output failure as missing user data. Legacy arithmetic cannot perform checked unit conversions or clock outputs.
+HYPOTHESIS: A compact source-anchored operation plan lets code own numeric locale, unit conversions, exact arithmetic and clock rendering; bounded transport normalization and typed technical errors remove the format-to-UNKNOWN failure path.
+EVIDENCE: Refreshed service/source baseline matched the Oct14 sources (service PID2727 after host boot). Existing114 tests PASS. New baseline26 tests reproduced4 failures/21 errors for missing plan/unit/time support, structured/fenced output and honest errors. Captured Qwen unknown-only response and v2 unsubstantiated unknown both failed dedicated baselines. Additional new-engine decimal-vs-clock and dropped-sign defects were reproduced and corrected before activation.
+PATCH: New v2 schema v/q/s/o/u uses exact quantity excerpts and backward references; no model-supplied results/constants or arbitrary code. Code checks numeric locale, source token boundaries/signs, dimensions, exact Fraction arithmetic, a bounded metric/count/percent unit registry and clock rollover/fractions. Retain legacy proofs. Decode complete JSON fences and recognized structured proof objects, reject partial/duplicate/NaN payloads. Respect finish_reason=length; repair once with unchanged provider retry limits/alias behavior. Propagate repair provider failures. Exhausted proof validation raises DIRECT_OUTPUT_INVALID (HTTP502), with safe UI text, retained draft/history and no failed answer persistence. UNKNOWN remains for named missing inputs; v2 unknowns and unknown-only legacy proofs require an absence signal in supplied input. This lexical guard is conservative and not complete semantic provenance.
+TEST: Compile Python and JS syntax PASS. Final148 offline Python tests PASS (114 prior +34 new) across calculation matrix, captured tank replay, DIRECT/provider/API, router, RESEARCH API/OpenAI compatibility and provider subtype/retry scopes. Three existing/new UI suites PASS. Exact original tank input with a scripted v2 plan renders09:44:10 and1500kg; captured truncated+unknown-only repair yields technical error; corrected repair yields calculated answer. Source/KG side-effect traps remain zero. Old tests expecting HTTP200 UNKNOWN for invalid proof/provider failure were backed up and changed to assert the intentionally approved error contract; unsafe-value rejection and provider retry assertions retained.
+RESULT: Offline calculation and API/UI behavior PASS. Router/orchestrator/API/analyzer hashes unchanged. KG SHA/hash/mtime unchanged. No new live provider requests, service restart, configuration or Git operations. Service PID2727 still running; activation and bounded live provider acceptance are pending authorization.
+STATUS: PATCHED
+
+
+## 2026-10-16 — DIRECT coding contract (offline verified; activation pending)
+
+DATE: 2026-10-16
+FILE: hermes_agent/coding_intent.py; hermes_agent/direct_coding.py; hermes_agent/semantic_router.py; hermes_agent/orchestrator.py; tests/test_direct_coding.py; tests/test_direct_coding_api.py
+PROBLEM: Self-contained code creation/repair fell into RESEARCH or was rejected by the arithmetic/excerpt contract even when generated Python was correct.
+HYPOTHESIS: Route code artifacts by external-information needs and select a coding output contract inside DIRECT.
+EVIDENCE: Six-case audit routed four coding requests to RESEARCH; valid addition code passed four functional checks but all four output forms failed the old gate. Real orchestrator with scripted aliases reproduced DIRECT_OUTPUT_INVALID. New baseline:19 methods,14 failures/13 errors (including subtests and absent new contract).
+PATCH: Add conservative coding-intent detection with explicit external dependency precedence and exclusions for non-programming code terms. Code route uses a dedicated prompt and bounded Markdown/code validation. Python syntax is parsed/compiled but never executed; other languages are explicitly marked unchecked. One output repair; existing provider recovery stays unchanged. No change to arithmetic proof validation, research pipeline, API or UI source.
+TEST: Existing baseline143 PASS. Final188 Python tests PASS (143 existing +24 coding +21 router matrix). Three UI suites PASS; Python compile and scoped diff check PASS. Offline HTTP success persists exact code once; rejection returns502 with no persistence. Network disabled in coding integration tests.
+RESULT: Coding source/offline behavior verified; production activation and live model acceptance remain OPEN. Python syntax acceptance does not prove functional correctness. Other languages receive format validation only. No general-purpose execution environment or sandbox is added. Translation/general-chat contracts remain outside this patch.
+STATUS: PATCHED
+BACKUP: backup/patch_direct_coding_20261016_041251_355156Z/; later test/edge backups remain under backup/.
+NEXT STEP: Obtain approval to restart only hermes.service, then one identical controlled coding UI submit per DeepSeek and9routerpc. Prior two-request tank approval was consumed. No additional live request, restart, configuration change, commit, push or pull was performed for this patch.

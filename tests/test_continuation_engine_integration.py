@@ -154,7 +154,7 @@ class ContinuationEngineIntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             result.policy.decision,
-            ContinuationDecision.CONTINUE,
+            ContinuationDecision.DEGRADE,
         )
 
         state = store.get("S001")
@@ -181,7 +181,7 @@ class ContinuationEngineIntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             state.continuation_count,
-            1,
+            0,
         )
 
         self.assertEqual(
@@ -271,6 +271,7 @@ class ContinuationEngineIntegrationTests(unittest.TestCase):
             outcome_classifier=OutcomeClassifier(),
             coverage_evaluator=coverage,
             continuation_policy=ContinuationPolicy(),
+            multi_model_router=True,
         )
 
         result = engine.step(
@@ -285,7 +286,7 @@ class ContinuationEngineIntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             result.policy.decision,
-            ContinuationDecision.DEGRADE,
+            ContinuationDecision.CONTINUE,
         )
 
         state = store.get("S001")
@@ -299,6 +300,7 @@ class ContinuationEngineIntegrationTests(unittest.TestCase):
             state.attempts_total,
             1,
         )
+        self.assertEqual(state.provider_retry_count, 1)
 
         self.assertEqual(
             len(llm.calls),

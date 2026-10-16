@@ -20,6 +20,7 @@ from hermes_agent.capability import (
     CapabilityScheduler,
 )
 from hermes_agent.semantic_router import SemanticRouter
+from hermes_agent.direct_coding import CODING_PROMPT, enforce_code_answer
 from hermes_agent.skill_router import SkillRouter
 from hermes_agent.skill_bridge import SkillBridge
 from hermes_agent.skill_executors import (
@@ -28,7 +29,8 @@ from hermes_agent.skill_executors import (
     weather_executor,
 )
 from hermes_agent.search_strategy import SearchStrategy
-from hermes_agent.fact_checker import FactChecker, extract_json
+from hermes_agent.fact_checker import FactChecker, FactExtractionFailure, extract_json
+from hermes_agent.research_status import build_research_metadata
 from hermes_agent.llm_output_contract import llm_output_failure
 from hermes_agent.fact_ranker import FactRanker
 from hermes_agent.token_profiler import TokenProfiler
@@ -41,6 +43,10 @@ from hermes_agent.section_worker import SectionWorker
 from hermes_agent.coverage_evaluator import CoverageEvaluator
 from hermes_agent.section_splitter import SectionSplitter
 from hermes_agent.outcome_classifier import OutcomeClassifier
+from hermes_agent.direct_provider_recovery import analyze_direct
+from hermes_agent.direct_answer_grounding import (
+    DIRECT_GROUNDING_PROMPT, enforce_direct_answer, supplied_input,
+)
 from hermes_agent.continuation_policy import (
     ContinuationDecision,
     ContinuationPolicy,
@@ -54,7 +60,7 @@ logger = logging.getLogger(__name__)
 _WEB_OCR_LOCK = threading.Lock()
 
 
-class HermesAgent:
+class AranAgent:
 
     MAX_ITERATIONS = 20
     PARALLEL_NODES = 3
@@ -229,10 +235,22 @@ RULES:
         total = sum(1 for n in nodes.values() if n.get("type") != "project")
         return (found / total * 100) if total > 0 else 0
 
-    def _fetch_url_parallel(self, urls: list, seen: set, query: str, errors: dict = None) -> list:
+    def _fetch_url_parallel(
+        self,
+        urls: list,
+        seen: set,
+        query: str,
+        errors: dict = None,
+        preserve_full_file_by_url: dict | None = None,
+    ) -> list:
         results = []
         def fetch_one(url):
             if url in seen: return None
+            preserve_full_file = (
+                preserve_full_file_by_url.get(url, False)
+                if preserve_full_file_by_url
+                else False
+            )
             raw = self.skill_bridge.execute_skill(
                 "agent-reach-fetch",
                 url,
@@ -243,7 +261,12 @@ RULES:
                     errors[url] = raw
                 return None
             if raw and len(raw) > 50:
-                processed = self.docintel.process(raw, query, url=url)
+                processed = self.docintel.process(
+                    raw,
+                    query,
+                    url=url,
+                    preserve_full_file=preserve_full_file,
+                )
 
                 content = processed["formatted"]
 
@@ -297,7 +320,12 @@ RULES:
                     url, processed.get("doc_type"), processed.get("sections_total"),
                     processed.get("sections_kept"), processed.get("char_before"), processed.get("char_after"),
                 )
-                return {"url": url, "content": content, "doc_type": processed["doc_type"]}
+                return {
+                    "url": url,
+                    "content": content,
+                    "doc_type": processed["doc_type"],
+                    "preserve_full_file": bool(preserve_full_file),
+                }
             else:
                 if errors is not None and url not in errors:
                     errors[url] = "EMPTY_CONTENT" if raw is not None else "NO_RESPONSE"
@@ -398,6 +426,19 @@ RULES:
             len(evidence) - len(filtered),
         )
         return filtered
+
+    @staticmethod
+    def _should_skip_controller_recovery(plan):
+        """Do not expand a deterministic fallback plan after unresolved work."""
+        return bool(isinstance(plan, dict) and plan.get("planner_fallback"))
+
+    @staticmethod
+    def _is_completeness_evaluator_failure(reason):
+        """A failed evaluator call is not evidence that the plan is incomplete."""
+        return isinstance(reason, str) and reason.startswith((
+            "evaluator_error:",
+            "evaluator_invalid_response",
+        ))
 
     def _evaluate_requirement_fulfillment(
         self,
@@ -522,17 +563,25 @@ Return ONLY valid JSON:
                     flush=True,
                 )
 
-            fulfilled = (
+            valid_evaluator_result = (
                 isinstance(parsed, dict)
+                and isinstance(parsed.get("fulfilled"), bool)
+                and (
+                    "missing" not in parsed
+                    or isinstance(parsed.get("missing"), list)
+                )
+            )
+            fulfilled = (
+                valid_evaluator_result
                 and parsed.get("fulfilled") is True
             )
             reason = (
                 parsed.get("reason", "no reason")
-                if isinstance(parsed, dict)
-                else "invalid evaluator response"
+                if valid_evaluator_result
+                else "evaluator_invalid_response"
             )
             missing = []
-            if isinstance(parsed, dict) and isinstance(parsed.get("missing"), list):
+            if valid_evaluator_result and isinstance(parsed.get("missing"), list):
                 missing = [str(m).strip() for m in parsed["missing"] if str(m).strip()]
 
         except Exception as exc:
@@ -634,6 +683,39 @@ Return ONLY valid JSON:
             "depends_on": [],
             "is_recovery": True,
         }
+
+    def _resolve_controller_recovery_requirement(
+        self,
+        unmet_reason: str,
+        current_facts: dict,
+        plan: dict,
+        missing_items: list | None = None,
+        goal: str = "",
+    ) -> dict | None:
+        """Keep controller recovery from expanding deterministic fallback plans."""
+        failure_class = str(unmet_reason).strip().upper()
+        if failure_class in {
+            "PROVIDER_EXHAUSTED",
+            "WORKER_OUTPUT_INVALID",
+            "TRUNCATED_OUTPUT_UNUSABLE",
+        }:
+            logger.warning(
+                "[CONTROLLER GATE] %s is not evidence insufficiency",
+                failure_class.lower(),
+            )
+            return None
+        if self._should_skip_controller_recovery(plan):
+            logger.warning(
+                "[CONTROLLER GATE] planner_fallback=True; preserve unresolved plan without recovery expansion"
+            )
+            return None
+        return self._resolve_recovery_requirement(
+            unmet_reason,
+            current_facts,
+            plan,
+            missing_items=missing_items,
+            goal=goal,
+        )
 
     def _inject_recovery_requirement(
         self,
@@ -760,6 +842,19 @@ Return ONLY valid JSON:
                 )
                 continue
 
+            if ev.get("preserve_full_file") is True:
+                relevant = True
+                reason = "preserve_full_file_exact_target"
+                self._validation_cache[cache_key] = (relevant, reason)
+                logger.info(
+                    "[AUDIT EVIDENCE GATE] topic=%s url=%s decision=ACCEPT reason=%s",
+                    topic,
+                    url,
+                    reason,
+                )
+                validated.append(ev)
+                continue
+
             prompt = f"""You are an evidence relevance validator.
 
 REQUIREMENT TOPIC:
@@ -784,20 +879,28 @@ IMPORTANT:
 - A document merely mentioning the entity/topic is NOT sufficient.
 - Configuration information is not sufficient for a performance requirement.
 - General metadata is not sufficient for a technical requirement.
-- The document must contain substantive information that contributes to
-  answering one or more parts of the stated requirement.
+- First establish whether the evidence refers to the same subject, entity,
+  scenario, and context identified by the requirement, when those identifiers
+  are available.
+- When the requirement provides identifying context, the evidence must
+  substantively support at least one required component within that same
+  context before it can be marked relevant.
+- An explicitly different or conflicting subject, entity, scenario, or
+  context is NOT relevant, even if it shares a keyword, number, or requested
+  component with the requirement.
+- Matching the broad topic or a component label alone does not establish
+  that the evidence belongs to the required context.
 - A document does NOT need to satisfy the entire requirement by itself.
-- If the requirement contains multiple factual components, fields,
-  attributes, or sub-requirements, mark the document relevant if it
-  provides reliable evidence for ANY one or more of those components.
-- Partial evidence is relevant evidence.
-- Do NOT reject a document merely because another requested component
-  is missing from that document.
+- After context alignment is established, mark the document relevant if it
+  provides reliable evidence for ANY one or more required components.
+- Partial evidence from the same context is relevant evidence.
+- Do NOT reject a same-context document merely because another requested
+  component is missing from that document.
 - Overall completeness must be determined later by evidence aggregation,
   fact extraction, and requirement coverage.
-- Reject the document only when it provides no substantive information
-  that contributes to the requirement, or when the content is clearly
-  unrelated or unusable.
+- Reject the document when it provides no substantive information that
+  contributes within the required context, or when the content is clearly
+  unrelated, unusable, or context-mismatched.
 
 Return ONLY valid JSON:
 
@@ -890,8 +993,15 @@ Return ONLY valid JSON:
             "allow_social": any(term in text for term in social_terms),
         }
 
-    def research(self, goal: str, context: str = "", attachments: list | None = None) -> dict:
+    def research(
+        self,
+        goal: str,
+        context: str = "",
+        attachments: list | None = None,
+        request_id: str | None = None,
+    ) -> dict:
         profiler = TokenProfiler()
+        request_id = str(request_id or "")
         req_id = init_request_id()
 
         # Capability selection is separate from research planning.
@@ -938,6 +1048,7 @@ Return ONLY valid JSON:
         # hanya boleh memakai facts yang dihasilkan pada research run ini.
         request_facts = {}
         request_facts_lock = threading.Lock()
+        provider_failures = {}
         semantic_completion_cache = {}
 
         def request_requirement_complete(req_id):
@@ -945,6 +1056,16 @@ Return ONLY valid JSON:
                 self._resolve_request_fact_req_id(key, requirement_map.keys()) == req_id
                 for key in request_facts
             )
+
+        def unresolved_requirement_items():
+            unresolved = []
+            for req_id, requirement in requirement_map.items():
+                if request_requirement_complete(req_id):
+                    continue
+                topic = requirement.get("topic", req_id)
+                need = requirement.get("need", "documentation")
+                unresolved.append(f"{topic}: {need}")
+            return unresolved
 
         t0_total = time.time()
 
@@ -1056,25 +1177,46 @@ Return ONLY valid JSON:
                     f"{memory_context}"
                 )
 
-            result = self.llm.analyze(
+            if route.reason == "coding":
+                result = analyze_direct(
+                    self.llm, request_id=request_id,
+                    system_prompt=CODING_PROMPT,
+                    user_query=direct_query, temperature=0.2,
+                )
+                return enforce_code_answer(
+                    self.llm, result, goal=goal, user_query=direct_query,
+                    request_id=request_id,
+                )
+
+            result = analyze_direct(
+                self.llm,
+                request_id=request_id,
                 system_prompt=(
                     "You are a precise technical assistant. "
                     "Answer directly and concisely. "
-                    "Use only facts provided by the user. "
+                    "Use only facts explicitly provided by the user and their deterministic consequences. "
                     "Treat CONVERSATION CONTEXT as prior discussion and verified information from previous turns. "
                     "Treat USER ATTACHMENT EVIDENCE as user-provided evidence. "
                     "Do not invent missing facts, labels, constraints, or assumptions. "
-                    "For logic and reasoning problems, distinguish facts from assumptions. "
-                    "If the information is insufficient for a unique answer, say so clearly "
-                    "and identify what information is missing. "
+                    "Deterministic arithmetic derived only from supplied facts is allowed; calculate it directly without external sources or citations. "
+                    "If a required input is missing, state that the result cannot be determined from the provided information and name the missing input. "
+                    "Do not fill missing inputs with generic defaults or outside facts. "
+                    "Use external knowledge only when the user explicitly asks for external research. "
+                    "For quantities representing discrete entities, if deterministic arithmetic yields a non-integer count, preserve the numeric result and explicitly flag the domain inconsistency. "
+                    "Do not silently round or replace that result. "
                     "Do not search the web. "
                     "Do not use the research pipeline."
+                    + DIRECT_GROUNDING_PROMPT
                 ),
                 user_query=direct_query,
                 temperature=0.2,
             )
 
-            return result["content"]
+            return enforce_direct_answer(
+                self.llm, result,
+                source=supplied_input(goal, context, attachment_context),
+                goal=goal, request_id=request_id,
+            )
 
 
         # KnowledgeGraph is research-only. Direct requests must not acquire
@@ -1206,10 +1348,15 @@ Return ONLY valid JSON:
                 preload_urls,
             )
 
+            preload_preserve_full_file_by_url = {
+                url: bool(CapabilityResolver.FILE_TARGET_PATTERN.search(url))
+                for url in preload_urls
+            }
             preload_results = self._fetch_url_parallel(
                 preload_urls,
                 set(),
                 goal,
+                preserve_full_file_by_url=preload_preserve_full_file_by_url,
             )
 
             for evidence in preload_results:
@@ -1245,6 +1392,14 @@ Return ONLY valid JSON:
 
 
             for req_id, k in requirement_map.items():
+                if req_id in provider_failures:
+                    logger.warning(
+                        "[AUDIT READY NODE] req_id=%s decision=SKIP_PROVIDER_FAILURE failure_class=%s",
+                        req_id,
+                        provider_failures[req_id].get("failure_class"),
+                    )
+                    continue
+
                 node = kg.graph["nodes"].get(req_id, {})
                 status = node.get("status", "MISSING_NODE")
                 deps = k.get("depends_on", [])
@@ -1355,6 +1510,15 @@ Return ONLY valid JSON:
             ready = request_ready_nodes()
 
             if not ready:
+                # Provider failure is not evidence insufficiency. Keep the accepted
+                # request-local evidence and terminate without planner/search recovery.
+                if provider_failures:
+                    logger.warning(
+                        "[CONTROLLER GATE] provider failure(s)=%s; skip recovery/search expansion",
+                        provider_failures,
+                    )
+                    break
+
                 # CONTROLLER TERMINATION & RECOVERY GATE
                 current_facts = dict(request_facts)
                 semantic_topic = plan.get("goal", goal)
@@ -1367,8 +1531,19 @@ Return ONLY valid JSON:
                     semantic_completion_cache,
                 )
 
-                if fulfilled:
-                    logger.info("[CONTROLLER GATE] all success criteria met -> complete")
+                unresolved_items = unresolved_requirement_items()
+                if fulfilled or not unresolved_items:
+                    logger.info(
+                        "[CONTROLLER GATE] no unresolved current requirements -> graceful complete"
+                    )
+                    break
+
+                if self._is_completeness_evaluator_failure(reason):
+                    logger.warning(
+                        "[CONTROLLER GATE] completeness evaluator failed; "
+                        "skip global recovery reason=%s",
+                        reason,
+                    )
                     break
 
                 if recovery_attempts >= max_recovery_attempts:
@@ -1379,8 +1554,12 @@ Return ONLY valid JSON:
                     )
                     break
 
-                recovery_k = self._resolve_recovery_requirement(
-                    reason, current_facts, plan, missing_items=missing, goal=goal
+                recovery_k = self._resolve_controller_recovery_requirement(
+                    reason,
+                    current_facts,
+                    plan,
+                    missing_items=unresolved_items,
+                    goal=goal,
                 )
                 if not recovery_k:
                     logger.info("[CONTROLLER GATE] no actionable recovery -> graceful incomplete")
@@ -1482,10 +1661,24 @@ Return ONLY valid JSON:
                         }
                     ]
 
-                        new_facts, usage = self.facts.extract_facts_batch(
-                            attachment_for_req,
-                            checklist,
-                        )
+                        try:
+                            new_facts, usage = self.facts.extract_facts_batch(
+                                attachment_for_req,
+                                checklist,
+                            )
+                        except FactExtractionFailure as exc:
+                            provider_failures[req_id] = {
+                                "failure_class": exc.failure_class,
+                                "message": str(exc),
+                                "attempts": exc.attempts,
+                            }
+                            logger.error(
+                                "[AUDIT FACT EXTRACTION FAILURE] req_id=%s failure_class=%s attempts=%d evidence_preserved=%d",
+                                req_id, exc.failure_class, exc.attempts, len(attachment_for_req),
+                            )
+                            kg.update_status(req_id, NodeExecutionState.FAILED)
+                            latency.stop("extract")
+                            return 0
 
                         ranked = self.ranker.rank(
                             new_facts,
@@ -1669,6 +1862,73 @@ Return ONLY valid JSON:
                 # Fetch the exact target first instead of searching for generic
                 # procedures to access the target.
                 node_target = k.get("target")
+                if not node_target and not k.get("is_recovery"):
+                    _raw_ctx = f"{topic} {need} {goal}"
+                    _ctx_urls = list(
+                        dict.fromkeys(list(direct_urls) + self._extract_urls(_raw_ctx))
+                    )
+                    _has_gh_blob = False
+                    _gh_owner_repo = None
+                    for _u in _ctx_urls:
+                        _pu = urlparse(_u)
+                        if _pu.netloc.lower() == "github.com":
+                            _parts = [p for p in _pu.path.strip("/").split("/") if p]
+                            if len(_parts) >= 5 and _parts[2] == "blob":
+                                _has_gh_blob = True
+                                break
+                            if len(_parts) == 2 and _gh_owner_repo is None:
+                                _gh_owner_repo = (
+                                    _parts[0],
+                                    _parts[1].removesuffix(".git"),
+                                )
+                    if not _has_gh_blob:
+                        _stripped_ctx = _raw_ctx
+                        for _u in _ctx_urls:
+                            _stripped_ctx = _stripped_ctx.replace(_u, " ")
+                        _file_matches = [
+                            m.strip("./")
+                            for m in CapabilityResolver.FILE_TARGET_PATTERN.findall(
+                                _stripped_ctx
+                            )
+                            if m.strip("./")
+                            and not m.lower().startswith("github.com/")
+                        ]
+                        if _file_matches:
+                            _rel_path = next(
+                                (m for m in _file_matches if "/" in m),
+                                _file_matches[0],
+                            )
+                            if _gh_owner_repo is None and any(
+                                kw in _stripped_ctx.lower()
+                                for kw in ("github", "repository", "repo")
+                            ):
+                                _slug_patterns = (
+                                    r"\b(?:github(?:\s+repository|\s+repo)?|repository|repo|at|from|in|di|dari)\s+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\b",
+                                    r"\b([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\b",
+                                )
+                                for _pat in _slug_patterns:
+                                    for _m_slug in re.finditer(
+                                        _pat, _stripped_ctx, re.IGNORECASE
+                                    ):
+                                        _cand = f"{_m_slug.group(1)}/{_m_slug.group(2)}"
+                                        if (
+                                            _cand not in _file_matches
+                                            and not CapabilityResolver.FILE_TARGET_PATTERN.fullmatch(
+                                                _cand
+                                            )
+                                        ):
+                                            _gh_owner_repo = (
+                                                _m_slug.group(1),
+                                                _m_slug.group(2).removesuffix(".git"),
+                                            )
+                                            break
+                                    if _gh_owner_repo is not None:
+                                        break
+                            if _gh_owner_repo:
+                                node_target = (
+                                    f"https://github.com/{_gh_owner_repo[0]}/{_gh_owner_repo[1]}"
+                                    f"/blob/HEAD/{_rel_path}"
+                                )
                 if node_target:
                     logger.info(
                         "[AUDIT REQ TARGET MODE] req_id=%s topic=%s target=%s",
@@ -1805,11 +2065,18 @@ Return ONLY valid JSON:
                         new_urls,
                     )
 
+                    requirement_preserve_full_file_by_url = {
+                        url: bool(CapabilityResolver.FILE_TARGET_PATTERN.search(url))
+                        for url in new_urls
+                    }
                     fetched_results = self._fetch_url_parallel(
                         new_urls,
                         set(),
                         f"{topic} {need}",
                         errors=fetch_errors,
+                        preserve_full_file_by_url=(
+                            requirement_preserve_full_file_by_url
+                        ),
                     )
 
                     for fetched in fetched_results:
@@ -1987,10 +2254,24 @@ Return ONLY valid JSON:
 
                     logger.info("=" * 80)
 
-                    new_facts, usage = self.facts.extract_facts_batch(
-                        evidence_for_req,
-                        checklist,
-                    )
+                    try:
+                        new_facts, usage = self.facts.extract_facts_batch(
+                            evidence_for_req,
+                            checklist,
+                        )
+                    except FactExtractionFailure as exc:
+                        provider_failures[req_id] = {
+                            "failure_class": exc.failure_class,
+                            "message": str(exc),
+                            "attempts": exc.attempts,
+                        }
+                        logger.error(
+                            "[AUDIT FACT EXTRACTION FAILURE] req_id=%s failure_class=%s attempts=%d evidence_preserved=%d",
+                            req_id, exc.failure_class, exc.attempts, len(evidence_for_req),
+                        )
+                        kg.update_status(req_id, NodeExecutionState.FAILED)
+                        latency.stop("extract")
+                        return 0
 
                     if not new_facts:
                         logger.warning(
@@ -2295,7 +2576,11 @@ Return ONLY valid JSON:
             )
         )
 
-        missing = [] if semantic_fulfilled else requirement_audit
+        missing = [
+            item
+            for item in requirement_audit
+            if item["status"] not in NodeExecutionState.SUCCESS_STATES
+        ]
 
         for r in requirement_audit:
             r["semantic_fulfilled"] = semantic_fulfilled
@@ -2355,7 +2640,46 @@ Return ONLY valid JSON:
             missing_topics = [r["topic"] for r in missing] or [
                 r["topic"] for r in requirement_audit
             ]
-            if missing_topics:
+            if provider_failures:
+                failure_classes = {
+                    failure.get("failure_class")
+                    for failure in provider_failures.values()
+                }
+                has_worker_output_invalid = "WORKER_OUTPUT_INVALID" in failure_classes
+                has_truncated_output_unusable = "TRUNCATED_OUTPUT_UNUSABLE" in failure_classes
+                has_provider_exhaustion = "PROVIDER_EXHAUSTED" in failure_classes
+                failure_status = (
+                    "WORKER_OUTPUT_INVALID" if has_worker_output_invalid
+                    else (
+                        "TRUNCATED_OUTPUT_UNUSABLE" if has_truncated_output_unusable
+                        else (
+                            "PROVIDER_EXHAUSTED" if has_provider_exhaustion
+                            else "TERMINAL_REQUEST_FAILURE"
+                        )
+                    )
+                )
+                failure_detail = (
+                    "FactExtractor menerima output non-JSON/schema tidak valid setelah retry terbatas."
+                    if has_worker_output_invalid
+                    else (
+                        "FactExtractor hanya menerima output terpotong tanpa fakta tervalidasi setelah retry terbatas."
+                        if has_truncated_output_unusable
+                        else (
+                            "FactExtractor tidak memperoleh respons usable setelah retry terbatas."
+                            if has_provider_exhaustion
+                            else "FactExtractor berhenti karena kegagalan request terminal."
+                        )
+                    )
+                )
+                answer = (
+                    f"Riset berstatus {failure_status}: bukti yang telah diterima tetap tersimpan "
+                    f"dalam konteks request, tetapi {failure_detail} "
+                    "Tidak dilakukan pencarian atau perluasan recovery.\n\n"
+                    + "\n".join(f"- {req_id}: {failure['failure_class']}" for req_id, failure in provider_failures.items())
+                )
+                if missing_topics:
+                    answer += "\nRequirement belum terpenuhi:\n" + "\n".join(f"- {t}" for t in missing_topics)
+            elif missing_topics:
                 answer = (
                     "Riset tidak dapat diselesaikan: tidak ada fakta terverifikasi "
                     "yang berhasil diekstrak dari sumber yang ditemukan.\n\n"
@@ -2381,9 +2705,29 @@ Return ONLY valid JSON:
                 },
             )
 
+            research_status = (
+                "WORKER_OUTPUT_INVALID"
+                if any(f.get("failure_class") == "WORKER_OUTPUT_INVALID" for f in provider_failures.values())
+                else (
+                    "TRUNCATED_OUTPUT_UNUSABLE"
+                    if any(f.get("failure_class") == "TRUNCATED_OUTPUT_UNUSABLE" for f in provider_failures.values())
+                    else (
+                        "PROVIDER_EXHAUSTED"
+                        if any(f.get("failure_class") == "PROVIDER_EXHAUSTED" for f in provider_failures.values())
+                        else "TERMINAL_REQUEST_FAILURE" if provider_failures else "INCOMPLETE"
+                    )
+                )
+            )
+            research_metadata = build_research_metadata(
+                research_status, 0, provider_failures,
+                aggregator_status=None,
+            )
             return {
                 "goal": goal, "answer": answer,
                 "facts_count": 0, "iterations": iterations_completed,
+                "research_status": research_status,
+                "research": research_metadata,
+                "provider_failures": provider_failures,
                 "pipeline": pipeline_type, "graph_stats": kg.get_stats(),
                 "token_profile": profiler.summary(), "latency_profile": latency.summary(),
                 "api_cost": profiler.total_cost, "duration_ms": (time.time() - t0_total) * 1000,
@@ -2455,12 +2799,16 @@ Return ONLY valid JSON:
         for section in manifest.sections:
             store.create(section.section_id)
 
+        router_capability = getattr(self.llm, "is_multi_model_router", None)
+        multi_model_router = bool(router_capability()) if callable(router_capability) else False
         engine = ContinuationEngine(
             worker=self.section_worker,
             store=store,
             outcome_classifier=self.outcome_classifier,
             coverage_evaluator=self.coverage_evaluator,
             continuation_policy=self.continuation_policy,
+            multi_model_router=multi_model_router,
+            request_id=request_id,
         )
 
         scheduler.initialize()
@@ -2797,6 +3145,47 @@ Return ONLY valid JSON:
 
                     if decision.value != "SPLIT":
                         store.put(store_state)
+                    final_state = store.get(section.section_id)
+                    logger.info(
+                        "[CONTINUATION FINAL] %s",
+                        json.dumps(
+                            {
+                                "request_id": request_id,
+                                "section_id": section.section_id,
+                                "requirement_id": section.requirement_id,
+                                "requested_model_alias": engine._requested_model(None),
+                                "multi_model_router": multi_model_router,
+                                "provider_retry_count_before": step.provider_retry_count_before,
+                                "classification": step.outcome.value,
+                                "failure_subtype": step.failure_subtype,
+                                "policy_decision": decision.value,
+                                "policy_reason": (
+                                    "zero_evidence_termination"
+                                    if decision != step.policy.decision
+                                    else step.policy.reason
+                                ),
+                                "provider_retry_count_after": final_state.provider_retry_count,
+                                "section_store_state": {
+                                    "status": final_state.status.value,
+                                    "attempts_total": final_state.attempts_total,
+                                    "continuation_count": final_state.continuation_count,
+                                    "provider_retry_count": final_state.provider_retry_count,
+                                    "last_model": final_state.last_model,
+                                    "last_outcome": (
+                                        final_state.last_outcome.value
+                                        if final_state.last_outcome else None
+                                    ),
+                                    "last_failure_subtype": final_state.last_failure_subtype,
+                                    "chunk_count": len(final_state.chunks),
+                                    "accumulated_chars": len(final_state.accumulated_text),
+                                    "remaining_items": list(final_state.remaining_items),
+                                },
+                                "final_section_status": final_state.status.value,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                    )
                     break
 
         aggregated = self.output_aggregator.aggregate(manifest, store)
@@ -2843,10 +3232,35 @@ Return ONLY valid JSON:
             },
         )
 
+        research_status = (
+            "WORKER_OUTPUT_INVALID"
+            if any(f.get("failure_class") == "WORKER_OUTPUT_INVALID" for f in provider_failures.values())
+            else (
+                "TRUNCATED_OUTPUT_UNUSABLE"
+                if any(f.get("failure_class") == "TRUNCATED_OUTPUT_UNUSABLE" for f in provider_failures.values())
+                else (
+                    "PROVIDER_EXHAUSTED"
+                    if any(f.get("failure_class") == "PROVIDER_EXHAUSTED" for f in provider_failures.values())
+                    else "TERMINAL_REQUEST_FAILURE" if provider_failures else (
+                        "INCOMPLETE" if research_incomplete else "DONE"
+                    )
+                )
+            )
+        )
+        research_metadata = build_research_metadata(
+            research_status, len(all_facts), provider_failures,
+            aggregator_status=aggregated.scaler_status,
+        )
         return {
             "goal": goal, "answer": llm_result["content"],
             "facts_count": len(all_facts), "iterations": iterations_completed,
+            "research_status": research_status,
+            "research": research_metadata,
+            "provider_failures": provider_failures,
             "pipeline": pipeline_type, "graph_stats": kg.get_stats(),
             "token_profile": profiler.summary(), "latency_profile": latency.summary(),
             "api_cost": profiler.total_cost, "duration_ms": (time.time() - t0_total) * 1000,
         }
+
+# Backward compatibility: legacy imports resolve to the canonical class.
+HermesAgent = AranAgent

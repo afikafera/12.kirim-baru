@@ -1,5 +1,5 @@
 """
-Deterministic scheduler for Hermes Output Scaling sections.
+Deterministic scheduler for ARAN Output Scaling sections.
 
 The scheduler owns section readiness and lifecycle transitions only.
 It does not execute LLM calls, select providers, assemble output,

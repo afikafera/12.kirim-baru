@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime
 from threading import Lock
 
-_LOG = Path("/tmp/hermes_events.jsonl")
+_LOG = Path("/tmp/aran_events.jsonl")
 _LOCK = Lock()
 
 _REQUEST_ID = contextvars.ContextVar(

@@ -84,7 +84,7 @@ class TestLessonsEngine:
         pass
 
 
-class TestHermesAgent:
+class TestAranAgent:
     def __init__(self, _mm, _cal, llm, _outcome, _lessons):
         self.llm = llm
         self.calls = []
@@ -126,7 +126,7 @@ with (
     patch.object(llm_module, "LLMAnalyzer", TestLLM),
     patch.object(outcome_module, "OutcomeLogger", TestOutcomeLogger),
     patch.object(lessons_module, "LessonsEngine", TestLessonsEngine),
-    patch.object(orchestrator_module, "HermesAgent", TestHermesAgent),
+    patch.object(orchestrator_module, "AranAgent", TestAranAgent),
 ):
     import api.main as api_main
 
@@ -247,8 +247,8 @@ class ChatPersistenceApiTests(unittest.IsolatedAsyncioTestCase):
                     ("assistant", "answer:CHAT_A_SECOND"),
                 ],
             )
-            self.assertEqual(len(api_main.hermes.calls), 2)
-            self.assertIn("CHAT_A_TEST", api_main.hermes.calls[1][1])
+            self.assertEqual(len(api_main.aran.calls), 2)
+            self.assertIn("CHAT_A_TEST", api_main.aran.calls[1][1])
 
     async def test_post_created_conversation_gets_first_message_title(self):
         async with self.make_client() as client:
@@ -318,7 +318,7 @@ class ChatPersistenceApiTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual(invalid_chat.status_code, 404)
-            self.assertEqual(len(api_main.hermes.calls), 0)
+            self.assertEqual(len(api_main.aran.calls), 0)
 
     async def test_provider_failure_does_not_persist_partial_exchange(self):
         async with self.make_client() as client:

@@ -71,6 +71,25 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(provider_name, "deepseek-chat")
         self.assertEqual(provider["model"], "deepseek-chat")
 
+    def test_router_retry_capability_requires_explicit_provider_metadata(self):
+        config = {}
+        config.update(self._provider("9ROUTERPC", "opencode_free"))
+        config["LLM_PROVIDER_9ROUTERPC_MULTI_MODEL_ROUTER"] = "true"
+        config.update(self._provider("DEEPSEEK-CHAT", "deepseek-chat"))
+        config["LLM_PROVIDER_DEEPSEEK-CHAT_MULTI_MODEL_ROUTER"] = "false"
+        analyzer = LLMAnalyzer(config)
+
+        self.assertTrue(analyzer.is_multi_model_router("9routerpc"))
+        self.assertFalse(analyzer.is_multi_model_router("deepseek-chat"))
+        with analyzer.use_model("9routerpc"):
+            self.assertTrue(analyzer.is_multi_model_router())
+        with analyzer.use_model("deepseek-chat"):
+            self.assertFalse(analyzer.is_multi_model_router())
+
+        # Provider names alone do not activate router retry capability.
+        config2 = self._provider("ROUTERLIKE", "ordinary-model")
+        self.assertFalse(LLMAnalyzer(config2).is_multi_model_router("routerlike"))
+
     def test_unknown_model_is_rejected_by_provider_registry(self):
         analyzer = LLMAnalyzer(self._provider("POOLSIDE", "poolside/upstream"))
         with self.assertRaisesRegex(ValueError, "Unknown LLM model/provider"):

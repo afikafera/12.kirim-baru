@@ -2,7 +2,7 @@
 
 ## Overview
 
-ARAN is the user-facing name of this research and chat service. Its current implementation is a FastAPI application backed by the `hermes_agent` runtime. The custom UI is branded ARAN; API metadata, service names, logs, and internal packages still use Hermes/Technical Research Assistant terminology. The rename is transitional.
+ARAN is the primary product and runtime identity for this research and chat service. Its FastAPI application uses the `AranAgent` class from the compatibility-preserved `hermes_agent` package. Authentication variables, session cookie, telemetry fallback, data paths, and systemd unit names intentionally retain legacy Hermes identifiers in this phase.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ ARAN UI / OpenAI-compatible chat API
                   |
           FastAPI: api.main:app
                   |
-          HermesAgent core
+          AranAgent core
                   |
           SkillRouter -> SkillBridge
                   |
@@ -46,7 +46,7 @@ regression tests pass. The target does not establish active RAG or vector search
 
 ## Request / Research Flow
 
-The main entry point is `api.main:app`. `/v1/chat/completions` and `/chat/completions` accept OpenAI-compatible chat requests. The chat handler collects supported attachment context, builds conversation context, selects the requested provider, and calls `HermesAgent.research()`. A successful user exchange is persisted with its conversation.
+The main entry point is `api.main:app`. `/v1/chat/completions` and `/chat/completions` accept OpenAI-compatible chat requests. The chat handler collects supported attachment context, builds conversation context, selects the requested provider, and calls `AranAgent.research()`. A successful user exchange is persisted with its conversation.
 
 `POST /research` is a synchronous research route. `GET /research/{research_id}` retrieves a stored result; there is no separate asynchronous research-status endpoint in the current API.
 
@@ -132,7 +132,7 @@ A targeted unittest command verified in the current venv is:
 
 ## Observability / Logs
 
-The API creates Langfuse traces for research requests. The systemd unit sends stdout/stderr to the journal. Structured request events are appended to `/tmp/hermes_events.jsonl` by `hermes_agent/jsonl_logger.py`.
+The API creates Langfuse traces for research requests. The systemd unit sends stdout/stderr to the journal. Structured request events are appended to `/tmp/aran_events.jsonl` by `hermes_agent/jsonl_logger.py`; Archify readers fall back to the legacy `/tmp/hermes_events.jsonl` file.
 
 ## Status Matrix
 
@@ -166,13 +166,13 @@ These are verified for their targeted test cases; they do not establish general 
 - Attachment handling supports explicit Open WebUI file/source context and OCR for base64 images. Broad browser/RAG/file coverage is not verified; full-file preservation has targeted evidence with additional scenarios still open.
 - The model-picker JavaScript test currently stops in its DOM harness because `newChatButton` is undefined. The live login page responds, but a complete browser chat flow was not verified in this audit.
 - Conversation persistence has a PostgreSQL migration and owner-scoped code, but its integration test was not run because no disposable test database was configured.
-- Branding is transitional: ARAN is user-facing, while service, auth, telemetry, and internal runtime names remain Hermes.
+- The primary product/class identity is ARAN. The `hermes_agent` package, auth environment names, session cookie, and systemd unit names remain compatibility identifiers.
 
 ## Repository Structure
 
 ```text
 api/                 FastAPI entry point, auth, model registry, UI routes
-hermes_agent/        Hermes research runtime and orchestration
+hermes_agent/        ARAN research runtime and orchestration (legacy package name)
 aran_search/         ARAN search/fetch/evidence implementation
 memory_manager/      PostgreSQL and Qdrant backends
 ui/                  ARAN login/chat frontend

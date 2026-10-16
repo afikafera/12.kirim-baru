@@ -122,7 +122,7 @@ class WeatherConnector(BaseConnector):
         req = urllib.request.Request(
             full_url,
             headers={
-                "User-Agent": "HermesResearchAssistant/1.0 (open-meteo-connector)",
+                "User-Agent": "ARANResearchAssistant/1.0 (open-meteo-connector)",
                 "Accept": "application/json",
             },
         )

@@ -105,5 +105,42 @@ class TestLLMAnalyzerContentNull(unittest.TestCase):
         self.assertEqual(result["tokens_output"], 5)
 
 
+    @patch("llm_analyzer.analyzer.OpenAI")
+    def test_selected_provider_reaches_upstream_model(self, mock_openai_cls):
+        config = {
+            "LLM_DEFAULT_MODEL": "default",
+            "LLM_PROVIDER_DEFAULT_API_KEY": "default-test-key",
+            "LLM_PROVIDER_DEFAULT_BASE_URL": "https://default.invalid/v1",
+            "LLM_PROVIDER_DEFAULT_MODEL": "vendor/default-upstream",
+            "LLM_PROVIDER_POOLSIDE_API_KEY": "poolside-test-key",
+            "LLM_PROVIDER_POOLSIDE_BASE_URL": "https://poolside.invalid/v1",
+            "LLM_PROVIDER_POOLSIDE_MODEL": "poolside/laguna-s-2.1",
+        }
+        analyzer = LLMAnalyzer(config)
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="OK"),
+                finish_reason="stop",
+            )],
+            model="poolside/laguna-s-2.1",
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+        with analyzer.use_model("poolside"):
+            result = analyzer.analyze("system", "hello")
+
+        self.assertEqual(result["content"], "OK")
+        self.assertEqual(
+            mock_client.chat.completions.create.call_args.kwargs["model"],
+            "poolside/laguna-s-2.1",
+        )
+        self.assertEqual(
+            mock_openai_cls.call_args.kwargs["api_key"],
+            "poolside-test-key",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

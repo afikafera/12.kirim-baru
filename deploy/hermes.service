@@ -1,0 +1,21 @@
+[Unit]
+Description=Hermes authenticated API
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=arman
+Group=arman
+WorkingDirectory=/home/arman/research-assistant
+EnvironmentFile=/etc/hermes/auth.env
+ExecStart=/home/arman/research-assistant/venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

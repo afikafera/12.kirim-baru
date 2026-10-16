@@ -1,5 +1,5 @@
 """
-Capability Registry and Capability-Aware Scheduler for Hermes Agent.
+Capability Registry and Capability-Aware Scheduler for ARAN.
 
 Fase 3: Deterministic, zero-LLM, minimal capability routing:
 Requirement(topic + need) -> Capability -> Provider/Skill

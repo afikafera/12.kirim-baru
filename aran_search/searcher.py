@@ -1,3 +1,5 @@
+import base64
+import binascii
 import subprocess
 import json
 import urllib.parse
@@ -687,6 +689,29 @@ Status: {'SOLVED' if doc.metadata.get('solved') else 'Belum solved'}
 
         return url
 
+    @staticmethod
+    def _github_contents_api_url(url: str) -> str | None:
+        parsed = urlparse(url)
+        if parsed.netloc.lower() != "github.com":
+            return None
+
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) < 5 or parts[2] != "blob":
+            return None
+
+        owner, repo = parts[0], parts[1]
+        ref = urllib.parse.unquote(parts[3])
+        path = "/".join(urllib.parse.unquote(part) for part in parts[4:])
+        if not owner or not repo or not ref or not path:
+            return None
+
+        encoded_path = urllib.parse.quote(path, safe="/")
+        encoded_ref = urllib.parse.quote(ref, safe="")
+        return (
+            f"https://api.github.com/repos/{owner}/{repo}/contents/"
+            f"{encoded_path}?ref={encoded_ref}"
+        )
+
     def fetch_url(self, url: str) -> str:
         """Ambil konten dari URL apapun. Connectors > yt-dlp > Jina > Browser."""
         try:
@@ -876,7 +901,9 @@ URL: {url}
 """
 
             if "github.com" in url:
-                api_url = url.replace("github.com", "api.github.com/repos").replace("/blob/", "/contents/")
+                api_url = self._github_contents_api_url(url)
+                if not api_url:
+                    api_url = url.replace("github.com", "api.github.com/repos")
                 result = subprocess.run(
                     [
                         "curl", "-sS", "-L",
@@ -895,9 +922,35 @@ URL: {url}
                     github_body,
                     github_status,
                 )
-                if github_ok:
+                if not github_ok:
+                    return f"Error GitHub: {github_reason}"
+
+                # Repository URLs retain their existing metadata behavior.
+                if self._github_contents_api_url(url) is None:
                     return github_body[:2000]
-                return f"Error GitHub: {github_reason}"
+
+                try:
+                    payload = json.loads(github_body)
+                except json.JSONDecodeError:
+                    return "Error GitHub: INVALID_JSON"
+
+                if not isinstance(payload, dict) or payload.get("type") != "file":
+                    return "Error GitHub: NOT_FILE"
+                if payload.get("encoding") != "base64":
+                    return "Error GitHub: UNSUPPORTED_ENCODING"
+
+                encoded_content = payload.get("content")
+                if not isinstance(encoded_content, str) or not encoded_content.strip():
+                    return "Error GitHub: EMPTY_CONTENT"
+
+                try:
+                    normalized_content = "".join(encoded_content.split())
+                    return base64.b64decode(
+                        normalized_content,
+                        validate=True,
+                    ).decode("utf-8")
+                except (binascii.Error, UnicodeDecodeError):
+                    return "Error GitHub: INVALID_BASE64_CONTENT"
 
             host = urlparse(url).netloc.lower().split(":")[0]
 
@@ -931,7 +984,7 @@ URL: {url}
             jina_class = classify_fetch_result(jina_body, jina_status)
 
             if jina_class == FetchClass.SUCCESS:
-                return jina_body[:8000]
+                return jina_body
 
             browser_classes = {
                 FetchClass.BLOCK,

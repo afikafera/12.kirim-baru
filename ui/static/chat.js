@@ -36,6 +36,45 @@ function showStatus(text) {
   statusElement.textContent = text;
 }
 
+async function chatRequestError(response, fallback) {
+  const error = new Error(fallback);
+  try {
+    const detail = (await response.json())?.error;
+    if (detail?.route === "DIRECT") {
+      if (detail.code === "PROVIDER_EXHAUSTED") {
+        error.providerMessage = "Provider sementara tidak tersedia. Coba lagi atau pilih model lain.";
+      } else if (detail.code === "DIRECT_OUTPUT_INVALID") {
+        error.providerMessage = "Jawaban gagal diverifikasi. Coba lagi atau pilih model lain.";
+      } else if (detail.code === "INVALID_PROVIDER_OUTPUT") {
+        error.providerMessage = "Provider mengirim format jawaban yang tidak didukung. Coba lagi.";
+      } else if (detail.code === "TERMINAL_REQUEST_FAILURE") {
+        error.providerMessage = "Permintaan ditolak oleh provider. Periksa input atau pilih model lain.";
+      }
+    }
+  } catch (_) {
+    // Keep the existing generic message for non-JSON and unrelated errors.
+  }
+  return error;
+}
+
+function showResearchOutcome(research, fallback = "") {
+  const status = research?.status;
+  if (!["DONE", "PARTIAL", "FAILED"].includes(status)) {
+    statusElement.setAttribute("data-research-status", "");
+    showStatus(fallback);
+    return;
+  }
+
+  statusElement.setAttribute("data-research-status", status);
+  if (status === "DONE") {
+    showStatus("Riset selesai.");
+  } else if (status === "PARTIAL") {
+    showStatus("Riset belum lengkap. Jawaban yang tersedia tetap ditampilkan.");
+  } else {
+    showStatus("Riset gagal diselesaikan sepenuhnya. Jawaban yang tersedia tetap ditampilkan.");
+  }
+}
+
 function updateControls() {
   const blocked = busy || loadingConversation;
   promptElement.disabled = !authenticated || blocked;
@@ -159,7 +198,7 @@ async function regenerateMessage(assistantIndex) {
       redirectToLogin();
       return;
     }
-    if (!response.ok) throw new Error("Regeneration request failed");
+    if (!response.ok) throw await chatRequestError(response, "Regeneration request failed");
     const result = await response.json();
     const answer = result.choices?.[0]?.message?.content;
     if (typeof answer !== "string" || result.conversation_id !== conversationAtSubmit) {
@@ -174,10 +213,13 @@ async function regenerateMessage(assistantIndex) {
     messages = [...messages, { role: "user", content: userContent }, { role: "assistant", content: answer }];
     addMessage("user", userContent);
     addMessage("assistant", answer);
-    showStatus("Jawaban baru ditambahkan ke percakapan.");
+    showResearchOutcome(result.research, "Jawaban baru ditambahkan ke percakapan.");
     await loadConversations();
-  } catch (_) {
-    if (viewGeneration === navigationGeneration) showStatus("Jawaban baru gagal dibuat. Coba lagi.");
+  } catch (error) {
+    if (viewGeneration === navigationGeneration) {
+      if (error.providerMessage) statusElement.setAttribute("data-research-status", "");
+      showStatus(error.providerMessage || "Jawaban baru gagal dibuat. Coba lagi.");
+    }
   } finally {
     busy = false;
     updateControls();
@@ -526,7 +568,7 @@ chatForm.addEventListener("submit", async event => {
       redirectToLogin();
       return;
     }
-    if (!response.ok) throw new Error("Chat request failed");
+    if (!response.ok) throw await chatRequestError(response, "Chat request failed");
     const result = await response.json();
     const answer = result.choices?.[0]?.message?.content;
     const responseConversationId = result.conversation_id;
@@ -545,14 +587,15 @@ chatForm.addEventListener("submit", async event => {
     messages = [...requestMessages, { role: "assistant", content: answer }];
     addMessage("assistant", answer);
     renderConversations(conversations);
-    showStatus("");
+    showResearchOutcome(result.research);
     await loadConversations();
-  } catch (_) {
+  } catch (error) {
     if (viewGeneration === navigationGeneration) {
       userItem.remove();
       emptyStateElement.hidden = messagesElement.children.length > 0;
       promptElement.value = prompt;
-      showStatus("Jawaban gagal dimuat. Coba lagi.");
+      if (error.providerMessage) statusElement.setAttribute("data-research-status", "");
+      showStatus(error.providerMessage || "Jawaban gagal dimuat. Coba lagi.");
     }
   } finally {
     busy = false;

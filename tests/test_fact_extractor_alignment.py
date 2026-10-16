@@ -1,5 +1,7 @@
 """Temporary transport copy for the active-VM FactChecker regression test."""
 
+import unittest
+
 from hermes_agent.fact_checker import FactChecker
 
 
@@ -76,3 +78,59 @@ def test_acr_datasheet_table_fields_stay_aligned():
     assert "material_thickness" not in facts
     assert "box_reference" in facts
     assert "15 mm" in facts["box_reference"]["value"]
+
+
+class NestedWrapperLLM:
+    def __init__(self, payload):
+        import json
+        self.content = json.dumps(payload)
+
+    def analyze(self, *args, **kwargs):
+        return {"content": self.content, "tokens_input": 1, "tokens_output": 1, "api_cost": 0}
+
+
+class FactExtractorNestedWrapperTests(unittest.TestCase):
+    URL = "https://example.test/status-codes"
+    EVIDENCE = [{"url": URL, "doc_type": "documentation", "content": "200 OK succeeded. 303 See Other redirects. 404 Not Found. 500 Internal Server Error."}]
+
+    def test_nested_wrapper_description_facts_all_normalize(self):
+        from hermes_agent.fact_checker import FactChecker
+        payload = {"http_status_codes": {
+            key: {"description": description, "source": self.URL, "source_type": "documentation"}
+            for key, description in {
+                "http_200": "The request succeeded.",
+                "http_303": "The response redirects to another resource.",
+                "http_404": "The requested resource was not found.",
+                "http_500": "The server encountered an unexpected condition.",
+            }.items()
+        }}
+        facts, _ = FactChecker(NestedWrapperLLM(payload)).extract_facts_batch(
+            self.EVIDENCE, [{"field_id": "http_status_codes", "label": "HTTP status codes"}]
+        )
+        self.assertEqual(set(facts), {"http_200", "http_303", "http_404", "http_500"})
+        self.assertEqual(facts["http_200"]["value"], "The request succeeded.")
+        self.assertEqual(facts["http_303"]["source"], self.URL)
+        self.assertEqual(facts["http_500"]["source_type"], "documentation")
+
+    def test_canonical_value_payload_remains_unchanged(self):
+        from hermes_agent.fact_checker import FactChecker
+        payload = {"http_200": {"value": "The request succeeded.", "source": self.URL, "source_type": "documentation"}}
+        facts, _ = FactChecker(NestedWrapperLLM(payload)).extract_facts_batch(
+            self.EVIDENCE, [{"field_id": "http_200", "label": "HTTP 200"}]
+        )
+        self.assertEqual(facts["http_200"]["value"], "The request succeeded.")
+        self.assertEqual(facts["http_200"]["source"], self.URL)
+        self.assertEqual(facts["http_200"]["source_type"], "documentation")
+
+    def test_malformed_nested_objects_are_not_promoted(self):
+        from hermes_agent.fact_checker import FactChecker
+        payload = {"wrapper": {
+            "missing_source": {"description": "Not a fact without provenance."},
+            "metadata": {"title": "HTTP status page", "url": self.URL},
+            "empty": {"description": "", "source": self.URL},
+            "untrusted": {"description": "Unverified fact.", "source": "https://other.test/"},
+        }}
+        facts, _ = FactChecker(NestedWrapperLLM(payload)).extract_facts_batch(
+            self.EVIDENCE, [{"field_id": "http_status_codes", "label": "HTTP status codes"}]
+        )
+        self.assertEqual(facts, {})

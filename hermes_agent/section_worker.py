@@ -1,5 +1,5 @@
 """
-Execution worker for one Hermes Output Scaling section.
+Execution worker for one ARAN Output Scaling section.
 
 The worker prepares a deterministic section-scoped prompt and performs
 exactly one LLMAnalyzer call. It does not retry, route, recover,
@@ -110,8 +110,17 @@ class SectionWorker:
             separators=(",", ":"),
         )
 
+        is_continuation = bool(
+            context.get("is_continuation", context.get("continuation", False))
+        )
+        coverage_items = section.must_cover
+        if is_continuation:
+            remaining_items = context.get("remaining_items")
+            if isinstance(remaining_items, list):
+                coverage_items = remaining_items
+
         must_cover_text = "\n".join(
-            f"- {item}" for item in section.must_cover
+            f"- {item}" for item in coverage_items
         ) or "- No explicit checklist supplied."
 
         prompt_parts = [
@@ -165,6 +174,38 @@ RULES:
 
 {UNIVERSAL_GUARDRAILS}"""
         ]
+
+        if is_continuation:
+            accumulated_text = str(context.get("accumulated_text") or "")
+            if coverage_items:
+                remaining_text = "\n".join(
+                    f"- {item}" for item in coverage_items
+                )
+                continuation_instruction = (
+                    "Continue this SAME section from the prior partial output.\n"
+                    "Cover only the unresolved items.\n"
+                    "Do not restart the section.\n"
+                    "Do not repeat already-written content unless needed for grammatical continuity."
+                )
+            else:
+                remaining_text = "- None; the coverage evaluator reports no unresolved items."
+                continuation_instruction = (
+                    "Finish the interrupted section from the prior partial output.\n"
+                    "Do not add new scope or repeat completed content."
+                )
+
+            prompt_parts.append(
+                f"""\nSECTION CONTINUATION
+
+PRIOR PARTIAL OUTPUT:
+{accumulated_text}
+
+REMAINING COVERAGE:
+{remaining_text}
+
+INSTRUCTION:
+{continuation_instruction}"""
+            )
 
         if is_comparison_section(section):
             prompt_parts.append(f"\n{COMPARISON_CONTRACT}")

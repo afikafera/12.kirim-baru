@@ -8,6 +8,73 @@ from hermes_agent.llm_output_contract import llm_output_failure
 logger = logging.getLogger(__name__)
 
 
+class FactExtractionFailure(RuntimeError):
+    """Extraction did not complete because the worker/request failed."""
+
+    def __init__(self, failure_class: str, message: str, attempts: int):
+        super().__init__(message)
+        self.failure_class = failure_class
+        self.attempts = attempts
+
+
+class ProviderExhausted(FactExtractionFailure):
+    """The bounded extraction retries ended in provider-side failures."""
+
+    def __init__(self, message: str, attempts: int):
+        super().__init__("PROVIDER_EXHAUSTED", message, attempts)
+
+
+class WorkerOutputInvalid(FactExtractionFailure):
+    """The bounded router attempts returned structurally unusable output."""
+
+    def __init__(self, message: str, attempts: int):
+        super().__init__("WORKER_OUTPUT_INVALID", message, attempts)
+
+
+class TruncatedOutputUnusable(FactExtractionFailure):
+    """All bounded extraction attempts were truncated without usable facts."""
+
+    def __init__(self, message: str, attempts: int):
+        super().__init__("TRUNCATED_OUTPUT_UNUSABLE", message, attempts)
+
+
+_TERMINAL_REQUEST_MARKERS = (
+    "invalid api key", "authentication failed", "unauthorized", "forbidden",
+    "malformed request", "invalid request", "unknown llm model/provider",
+    "configuration error",
+)
+_RETRYABLE_PROVIDER_MARKERS = (
+    "model is unavailable", "model unavailable", "unsupported model",
+    "model not supported", "deprecated model", "timeout", "timed out",
+    "connection error", "connection reset", "network error", "temporarily unavailable",
+    "upstream unavailable", "bad gateway", "service unavailable",
+)
+
+
+def _provider_exception_is_retryable(error: Exception) -> bool:
+    """Keep this local to extraction; do not broaden global outcome rules."""
+    response = getattr(error, "response", None)
+    status = getattr(error, "status_code", None) or getattr(response, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+
+    message = str(error).lower()
+    if status in (401, 403) or any(marker in message for marker in _TERMINAL_REQUEST_MARKERS):
+        return False
+    if status == 429 or (status is not None and status >= 500):
+        return True
+    if status == 400:
+        return any(marker in message for marker in _RETRYABLE_PROVIDER_MARKERS)
+    if status is not None and 400 <= status < 500:
+        return False
+    if any(marker in message for marker in _RETRYABLE_PROVIDER_MARKERS):
+        return True
+    # Preserve the previous bounded retry for exceptions without reliable HTTP metadata.
+    return not isinstance(error, (ValueError, TypeError))
+
+
 def extract_json(text: str):
     if not isinstance(text, str):
         return {}
@@ -90,6 +157,163 @@ def extract_json(text: str):
         return merged_list
 
     return objects
+
+
+PARSE_OK_NONEMPTY = "PARSE_OK_NONEMPTY"
+PARSE_OK_EMPTY = "PARSE_OK_EMPTY"
+PARSE_INVALID = "PARSE_INVALID"
+
+
+def _extraction_shape_status(value, evidence_count=0):
+    """Classify parsed JSON against the FactExtractor's supported output shapes."""
+    metadata = {"source_url", "source", "source_type", "url", "type"}
+
+    if isinstance(value, list):
+        if not value:
+            return PARSE_OK_EMPTY
+        states = [_extraction_shape_status(item, evidence_count) for item in value]
+        return PARSE_OK_NONEMPTY if PARSE_OK_NONEMPTY in states else PARSE_INVALID
+
+    if not isinstance(value, dict):
+        return PARSE_INVALID
+    if not value:
+        return PARSE_OK_EMPTY
+
+    if (
+        ("field_id" in value or "id" in value)
+        and "value" in value
+        and value.get("value") not in (None, "")
+    ):
+        return PARSE_OK_NONEMPTY
+
+    root_source = any(value.get(key) for key in ("source_url", "source", "url"))
+    fact_items = [(key, item) for key, item in value.items() if key not in metadata]
+
+    if not fact_items:
+        # Root provenance metadata without facts is a valid empty extraction.
+        return PARSE_OK_EMPTY
+
+    if "facts" in value and len(fact_items) == 1:
+        nested_status = _extraction_shape_status(value["facts"], evidence_count)
+        if nested_status != PARSE_INVALID:
+            return nested_status
+
+    if root_source:
+        return PARSE_OK_NONEMPTY
+
+    if evidence_count == 1 and all(
+        not isinstance(item, dict) for _, item in fact_items
+    ):
+        # Preserve the existing single-source flat-output compatibility.
+        return PARSE_OK_NONEMPTY
+
+    for _, item in fact_items:
+        if not isinstance(item, dict):
+            continue
+        fact_value = item.get("value", item.get("description"))
+        item_source = item.get("source") or item.get("source_url") or item.get("url")
+        if fact_value not in (None, "") and (item_source or evidence_count == 1):
+            return PARSE_OK_NONEMPTY
+        nested_status = _extraction_shape_status(item, evidence_count)
+        if nested_status == PARSE_OK_NONEMPTY:
+            return PARSE_OK_NONEMPTY
+
+    return PARSE_INVALID
+
+
+def _contains_parseable_empty_json(text):
+    """Recognize empty JSON while preserving extract_json's embedded salvage behavior."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+
+    decoder = json.JSONDecoder()
+    candidates = [text.strip()]
+    for match in re.finditer(r'\x60\x60\x60(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)\s*\x60\x60\x60', text):
+        candidates.append(match.group(1).strip())
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if parsed in ({}, []) or (
+            isinstance(parsed, dict)
+            and set(parsed).issubset({"source_url", "source", "source_type", "url", "type"})
+        ):
+            return True
+
+    index = 0
+    while index < len(text):
+        positions = [pos for pos in (text.find("{", index), text.find("[", index)) if pos >= 0]
+        if not positions:
+            break
+        start = min(positions)
+        try:
+            parsed, end = decoder.raw_decode(text[start:])
+        except Exception:
+            index = start + 1
+            continue
+        if parsed in ({}, []):
+            return True
+        index = start + max(1, end)
+    return False
+
+
+def _parse_extraction_output(text, evidence_count=0):
+    """Return an explicit parse state plus the legacy parser's parsed value."""
+    parsed = extract_json(text)
+    state = _extraction_shape_status(parsed, evidence_count)
+    if state == PARSE_OK_EMPTY and parsed == {} and not _contains_parseable_empty_json(text):
+        return PARSE_INVALID, parsed
+    return state, parsed
+
+
+def _salvage_truncated_extraction(text, evidence_count=0):
+    """Return complete, parseable extraction objects from a truncated response."""
+    if not isinstance(text, str) or not text.strip():
+        return []
+
+    candidates = []
+    parsed = extract_json(text)
+    if _extraction_shape_status(parsed, evidence_count) == PARSE_OK_NONEMPTY:
+        candidates.append(parsed)
+
+    # A response can end after a complete final value but before its outer
+    # closing brace. Accept it only if adding that delimiter makes full JSON.
+    start = text.find("{")
+    if start >= 0:
+        body = text[start:].rstrip()
+        try:
+            candidate = json.loads(body + "}")
+        except Exception:
+            candidate = None
+        if (
+            isinstance(candidate, dict)
+            and _extraction_shape_status(candidate, evidence_count)
+            == PARSE_OK_NONEMPTY
+            and candidate not in candidates
+        ):
+            candidates.append(candidate)
+
+        # Otherwise close a prefix ending at a JSON separator. json.loads
+        # guarantees that no incomplete value is kept.
+        for cut in range(len(body) - 1, 0, -1):
+            if body[cut] not in (",", "}", "]"):
+                continue
+            try:
+                candidate = json.loads(body[:cut].rstrip(",") + "\n}")
+            except Exception:
+                continue
+            if (
+                isinstance(candidate, dict)
+                and _extraction_shape_status(candidate, evidence_count)
+                == PARSE_OK_NONEMPTY
+            ):
+                if candidate not in candidates:
+                    candidates.append(candidate)
+                break
+
+    return candidates
 
 
 _NUM_PATTERN = re.compile(r'\d+(?:[.,]\d+)?')
@@ -411,7 +635,7 @@ def _rule1_currency_adjacency(source_content: str, match_start: int, match_end: 
     uses 2 decimal places, not 3 -- a 3-digit fractional reading is
     inconsistent with money notation for any currency, so the thousands
     reading is the only one consistent with it. This is a documented
-    Hermes policy choice (a general currency-formatting convention), not
+    ARAN policy choice (a general currency-formatting convention), not
     a mathematical proof that a 3-digit decimal currency is impossible."""
     clause_start, clause_end = _clause_span(source_content, match_start, match_end)
     clause = source_content[clause_start:clause_end]
@@ -503,12 +727,11 @@ def resolve_ambiguous(candidate_value: str, source_content: str, window_chars: i
 
 
 def _normalize_extraction_kvs(all_kvs: dict, all_evidence: list) -> dict:
-    """
-    PATCH 10: Transform flat key-value pairs with root metadata into canonical nested dicts:
-      {"field": {"value": "...", "source": "...", "source_type": "..."}}
-    Preserves already-nested dicts unchanged.
-    Strictly provenance-aware: root_source must match a URL present in all_evidence.
-    If root_source is absent or invalid, flat primitives are NOT converted to facts.
+    """Normalize fact-shaped objects from flat or arbitrarily nested JSON.
+
+    A nested leaf is a fact only when it has a non-empty ``value`` or
+    ``description`` and a provenance URL that belongs to the supplied evidence.
+    Flat scalar output with root provenance remains supported for compatibility.
     """
     if not isinstance(all_kvs, dict):
         return {}
@@ -516,88 +739,93 @@ def _normalize_extraction_kvs(all_kvs: dict, all_evidence: list) -> dict:
     valid_urls = {
         str(e.get("url", "")).strip()
         for e in (all_evidence or [])
-        if e.get("url")
+        if isinstance(e, dict) and e.get("url")
     }
 
-    root_source = all_kvs.get("source_url") or all_kvs.get("source") or all_kvs.get("url")
-    root_source_type = all_kvs.get("source_type", "other")
+    def checked_source(candidate):
+        source = str(candidate).strip() if candidate else ""
+        return source if source in valid_urls else None
 
-    if not root_source and len(all_evidence or []) == 1 and all_evidence[0].get("url"):
-        root_source = all_evidence[0]["url"]
-        root_source_type = (
-            all_evidence[0].get("source_type")
-            or all_evidence[0].get("doc_type")
-            or "other"
-        )
+    def walk(mapping, inherited_source=None, inherited_type="other", allow_flat=False):
+        if not isinstance(mapping, dict):
+            return {}
 
-    clean_root_source = str(root_source).strip() if root_source else ""
-    if clean_root_source not in valid_urls:
-        clean_root_source = None
+        mapping_source = mapping.get("source_url") or mapping.get("source") or mapping.get("url")
+        local_source = checked_source(mapping_source) if mapping_source else inherited_source
+        local_type = mapping.get("source_type") or inherited_type or "other"
+        normalized = {}
+        metadata_keys = {"source_url", "source", "source_type", "url", "type"}
 
-    normalized = {}
-    metadata_keys = {"source_url", "source", "source_type", "url"}
+        for key, item in mapping.items():
+            if key in metadata_keys:
+                continue
 
-    for key, value in all_kvs.items():
-        if key in metadata_keys:
-            continue
+            if isinstance(item, dict):
+                explicit_item_source = item.get("source") or item.get("source_url") or item.get("url")
+                item_source = checked_source(explicit_item_source) if explicit_item_source else local_source
+                item_type = item.get("source_type") or item.get("type") or local_type
+                has_value = "value" in item
+                has_description = "description" in item
+                fact_value = item.get("value") if has_value else item.get("description")
 
-        if isinstance(value, dict):
-            if "value" in value:
-                item_dict = dict(value)
-                if isinstance(item_dict.get("value"), bool):
-                    item_dict["value"] = str(item_dict["value"])
-                item_src = item_dict.get("source") or item_dict.get("source_url") or item_dict.get("url")
-                if item_src:
-                    item_dict["source"] = str(item_src).strip()
-                elif clean_root_source:
-                    item_dict["source"] = clean_root_source
+                if (has_value or has_description) and fact_value not in (None, "") and item_source:
+                    fact = dict(item)
+                    fact["value"] = str(fact_value) if isinstance(fact_value, bool) else fact_value
+                    fact["source"] = item_source
+                    if item_type:
+                        fact["source_type"] = str(item_type).strip()
+                    normalized[str(key)] = fact
+                    continue
 
-                item_type = item_dict.get("source_type") or item_dict.get("type")
-                if item_type:
-                    item_dict["source_type"] = str(item_type).strip()
-                elif clean_root_source and root_source_type:
-                    item_dict["source_type"] = str(root_source_type).strip()
-
-                normalized[key] = item_dict
-            elif key == "facts" and value:
-                sub_input = dict(value)
-                if clean_root_source and not (
-                    sub_input.get("source_url") or sub_input.get("source") or sub_input.get("url")
+                # Preserve sourced scalar-leaf mappings as structured values.
+                # Containers and nested fact wrappers still recurse below.
+                if (
+                    allow_flat
+                    and key != "facts"
+                    and not (has_value or has_description)
+                    and item_source
                 ):
-                    sub_input["source"] = clean_root_source
-                    sub_input["source_type"] = root_source_type
-                sub_norm = _normalize_extraction_kvs(sub_input, all_evidence)
-                normalized.update(sub_norm)
-            elif value:
-                item_src = value.get("source") or value.get("source_url") or value.get("url")
-                eff_src = str(item_src).strip() if item_src else clean_root_source
-                if not eff_src or eff_src not in valid_urls:
-                    continue
-                item_type = value.get("source_type") or value.get("type") or root_source_type or "other"
-                payload = {k: v for k, v in value.items() if k not in metadata_keys}
-                if not payload:
-                    continue
-                normalized[key] = {
-                    "value": payload,
-                    "source": eff_src,
-                    "source_type": str(item_type).strip(),
-                }
-        elif isinstance(value, list) and value and clean_root_source:
-            normalized[key] = {
-                "value": value,
-                "source": clean_root_source,
-                "source_type": str(root_source_type).strip(),
-            }
-        elif isinstance(value, (str, int, float, bool)) and clean_root_source:
-            normalized[key] = {
-                "value": str(value),
-                "source": clean_root_source,
-                "source_type": str(root_source_type).strip(),
-            }
-        else:
-            continue
+                    payload = {
+                        payload_key: payload_value
+                        for payload_key, payload_value in item.items()
+                        if payload_key not in metadata_keys
+                    }
+                    if payload and all(
+                        isinstance(payload_value, (str, int, float, bool))
+                        for payload_value in payload.values()
+                    ):
+                        normalized[str(key)] = {
+                            "value": payload,
+                            "source": item_source,
+                            "source_type": str(item_type).strip() or "other",
+                        }
+                        continue
 
-    return normalized
+                # A wrapper can carry provenance that its child facts inherit.
+                child_source = item_source if mapping_source else (local_source if key == "facts" else None)
+                normalized.update(walk(item, child_source, item_type, allow_flat=(key == "facts")))
+                continue
+
+            if allow_flat and item is not None and item != "" and local_source:
+                normalized[str(key)] = {
+                    "value": str(item) if isinstance(item, bool) else item,
+                    "source": local_source,
+                    "source_type": str(local_type).strip() or "other",
+                }
+
+        return normalized
+
+    root_source = checked_source(
+        all_kvs.get("source_url") or all_kvs.get("source") or all_kvs.get("url")
+    )
+    root_type = all_kvs.get("source_type") or "other"
+    if not root_source and len(all_evidence or []) == 1:
+        only_evidence = all_evidence[0]
+        if isinstance(only_evidence, dict):
+            root_source = checked_source(only_evidence.get("url"))
+            root_type = only_evidence.get("source_type") or only_evidence.get("doc_type") or root_type
+
+    return walk(all_kvs, root_source, root_type, allow_flat=True)
 
 
 class FactChecker:
@@ -625,24 +853,30 @@ class FactChecker:
         if not all_evidence:
             return ({}, {"tokens_input": 0, "tokens_output": 0, "api_cost": 0})
 
-        BAD_PATTERNS = (
-            "error fetch",
-            "error_fetch",
-            "traceback",
+        HARD_REJECT_PATTERNS = (
             "access denied",
             "cloudflare",
             "captcha",
             "enable javascript",
+        )
+        ERROR_PAYLOAD_PREFIXES = (
+            "error fetch",
+            "error_fetch",
+            "traceback",
             "request failed",
         )
+
+        def is_rejected_evidence(evidence: dict) -> bool:
+            content = evidence["content"].lstrip().lower()
+            return (
+                any(pattern in content for pattern in HARD_REJECT_PATTERNS)
+                or content.startswith(ERROR_PAYLOAD_PREFIXES)
+            )
 
         candidates = [
             e for e in all_evidence
             if isinstance(e, dict) and e.get("content")
-            and not any(
-                pat in e["content"].lower()
-                for pat in BAD_PATTERNS
-            )
+            and not is_rejected_evidence(e)
         ]
 
         # Keep the most valuable documents instead of spending tokens on a
@@ -819,13 +1053,24 @@ or nested:
             # valid outcome (extractor rule 8), not a bug.
             # PATCH 11: token budget [2048, 4096] and partial JSON salvage
             extraction_max_tokens_schedule = [2048, 4096]
+            router_capability = getattr(self.llm, "is_multi_model_router", None)
+            multi_model_router = bool(router_capability()) if callable(router_capability) else False
             all_kvs = {}
-            # "content": "" so the SECOND logger.info(result["content"])
-            # block further down (unchanged, pre-existing debug logging)
-            # does not KeyError if every attempt is exhausted -- that
-            # case must fall through as a clean empty-facts result, not
-            # get mistaken for an exception in server.log.
+            extraction_payloads = []
+            truncated_attempts = 0
+
+            def retain_extraction_payload(payload):
+                # Keep response objects separate until the existing normalizer,
+                # provenance guard, and value checks validate their facts.
+                if isinstance(payload, list):
+                    extraction_payloads.extend(payload)
+                elif isinstance(payload, dict):
+                    extraction_payloads.append(payload)
+
+            # Keep a safe result shape for the unchanged response logging.
             result = {"content": "", "tokens_input": 0, "tokens_output": 0, "api_cost": 0}
+            last_provider_failure = None
+            last_structural_failure = None
             for extract_attempt in range(1, len(extraction_max_tokens_schedule) + 1):
                 attempt_max_tokens = extraction_max_tokens_schedule[extract_attempt - 1]
                 try:
@@ -840,6 +1085,15 @@ or nested:
                         f"[extract] call failed (attempt {extract_attempt}/{len(extraction_max_tokens_schedule)}, "
                         f"max_tokens={attempt_max_tokens}): {e}"
                     )
+                    if not multi_model_router:
+                        # Preserve the existing retry/result contract for single-model providers.
+                        continue
+                    if not _provider_exception_is_retryable(e):
+                        raise FactExtractionFailure(
+                            "TERMINAL_REQUEST_FAILURE", str(e), extract_attempt
+                        ) from e
+                    last_provider_failure = str(e) or type(e).__name__
+                    last_structural_failure = None
                     continue
 
                 result = attempt_result
@@ -850,39 +1104,78 @@ or nested:
                         f"[extract] output contract failed (attempt {extract_attempt}/{len(extraction_max_tokens_schedule)}, "
                         f"max_tokens={attempt_max_tokens}): {failure}"
                     )
-                    # Truncation salvage on final attempt: salvage completed key-values
-                    if failure == "length_truncated" and extract_attempt == len(extraction_max_tokens_schedule):
-                        raw_c = result.get("content", "")
-                        salvaged = extract_json(raw_c)
-                        if not salvaged and "{" in raw_c:
-                            s_idx = raw_c.find("{")
-                            cand_body = raw_c[s_idx:].rstrip()
-                            for cut in range(len(cand_body) - 1, 0, -1):
-                                if cand_body[cut] in (",", "}", "]"):
-                                    try:
-                                        test_p = json.loads(cand_body[:cut].rstrip(",") + "\n}")
-                                        if isinstance(test_p, dict) and test_p:
-                                            salvaged = test_p
-                                            break
-                                    except Exception:
-                                        continue
-                        if salvaged and isinstance(salvaged, dict):
-                            logger.info(f"[extract] salvaged {len(salvaged)} facts from length-truncated response")
-                            all_kvs = salvaged
-                            break
+                    if not multi_model_router or failure == "length_truncated":
+                        # Truncation is provider-agnostic and remains distinct
+                        # from provider exhaustion and structural invalidity.
+                        last_provider_failure = None
+                        last_structural_failure = None
+                    else:
+                        last_provider_failure = failure
+                        last_structural_failure = None
+
+                    if failure == "length_truncated":
+                        truncated_attempts += 1
+                        salvaged = _salvage_truncated_extraction(
+                            result.get("content", ""),
+                            evidence_count=len(all_evidence),
+                        )
+                        for payload in salvaged:
+                            retain_extraction_payload(payload)
+                        logger.info(
+                            "[extract] truncated attempt=%d salvaged_objects=%d",
+                            extract_attempt,
+                            len(salvaged),
+                        )
                     continue
+
+                parse_state, parsed_output = _parse_extraction_output(
+                    result["content"],
+                    evidence_count=len(all_evidence),
+                )
+                if parse_state == PARSE_INVALID:
+                    logger.warning(
+                        "[extract] structurally invalid JSON/schema output "
+                        "(attempt %d/%d)",
+                        extract_attempt,
+                        len(extraction_max_tokens_schedule),
+                    )
+                    if multi_model_router:
+                        last_provider_failure = None
+                        last_structural_failure = "invalid JSON/schema output"
+                        continue
+                    # Keep the pre-existing single-model result behavior.
+                    retain_extraction_payload(parsed_output)
+                    break
 
                 logger.info("=" * 80)
                 logger.info("[RAW EXTRACT RESPONSE]")
                 logger.info(result["content"])
                 logger.info("=" * 80)
-                all_kvs = extract_json(result["content"])
+                retain_extraction_payload(parsed_output)
+                last_provider_failure = None
+                last_structural_failure = None
                 break
             else:
-                logger.warning(
-                    f"[extract] all {len(extraction_max_tokens_schedule)} attempts exhausted, "
-                    "proceeding with empty facts"
-                )
+                if last_structural_failure is not None:
+                    raise WorkerOutputInvalid(
+                        f"Fact extraction returned structurally invalid output "
+                        f"after {len(extraction_max_tokens_schedule)} attempts: "
+                        f"{last_structural_failure}",
+                        attempts=len(extraction_max_tokens_schedule),
+                    )
+                if last_provider_failure is not None:
+                    raise ProviderExhausted(
+                        f"Fact extraction provider failed after {len(extraction_max_tokens_schedule)} attempts: "
+                        f"{last_provider_failure}",
+                        attempts=len(extraction_max_tokens_schedule),
+                    )
+                if truncated_attempts != len(extraction_max_tokens_schedule):
+                    logger.warning(
+                        f"[extract] all {len(extraction_max_tokens_schedule)} attempts exhausted, "
+                        "proceeding with empty facts"
+                    )
+
+            all_kvs = extraction_payloads
 
             # Candidate stream extraction: preserve all (field_id, fact_data) without premature overwrite
             candidate_stream = []
@@ -1035,6 +1328,16 @@ or nested:
                             if k_meta in value:
                                 existing[k_meta] = value[k_meta]
 
+            if (
+                truncated_attempts == len(extraction_max_tokens_schedule)
+                and not validated
+            ):
+                raise TruncatedOutputUnusable(
+                    "Fact extraction returned no validated facts after "
+                    f"{len(extraction_max_tokens_schedule)} truncated attempts",
+                    attempts=len(extraction_max_tokens_schedule),
+                )
+
             all_kvs = validated
 
             logger.info("=" * 80)
@@ -1064,6 +1367,8 @@ or nested:
                             e["had_facts"] = True
 
             return (all_kvs, result)
+        except FactExtractionFailure:
+            raise
         except Exception as e:
             logger.warning(f"[extract] fail: {e}")
             return ({}, {"tokens_input": 0, "tokens_output": 0, "api_cost": 0})

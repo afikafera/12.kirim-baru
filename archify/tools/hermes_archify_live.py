@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 
 ROOT = Path("/home/arman/research-assistant")
-TRACE = Path("/tmp/hermes_events.jsonl")
+TRACE = Path("/tmp/aran_events.jsonl")
+LEGACY_TRACE = Path("/tmp/hermes_events.jsonl")
 
 TRACE_TO_WORKFLOW = ROOT / "archify/tools/hermes_trace_to_workflow.py"
 OUTPUT = ROOT / "archify/input/live.workflow.json"
@@ -18,12 +19,13 @@ POLL_SECONDS = 0.5
 
 
 def read_events():
-    if not TRACE.exists():
+    trace_path = TRACE if TRACE.exists() else LEGACY_TRACE
+    if not trace_path.exists():
         return []
 
     events = []
 
-    with TRACE.open("r", encoding="utf-8") as f:
+    with trace_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
 
@@ -33,7 +35,7 @@ def read_events():
             try:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
-                # Hermes mungkin sedang menulis line.
+                # ARAN mungkin sedang menulis line.
                 continue
 
     return events
@@ -60,7 +62,7 @@ def atomic_write_jsonl(events):
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 
     fd, tmp_name = tempfile.mkstemp(
-        prefix=".hermes-live-",
+        prefix=".aran-live-",
         suffix=".jsonl",
         dir=str(OUTPUT.parent),
     )
@@ -153,7 +155,7 @@ def generate(events, request_id):
 
 def main():
     print("========================================")
-    print(" Hermes → Archify Live Bridge")
+    print(" ARAN → Archify Live Bridge")
     print("========================================")
     print(f"Trace   : {TRACE}")
     print(f"Output  : {OUTPUT}")

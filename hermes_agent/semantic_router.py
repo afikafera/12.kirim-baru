@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import re
+from hermes_agent.coding_intent import coding_request
 
 
 @dataclass
@@ -94,6 +95,16 @@ class SemanticRouter:
             return RouteResult(
                 mode="direct",
                 reason="translation",
+                confidence=0.95,
+            )
+
+        # Code generation is a DIRECT output kind; explicit external needs
+        # still select research. An API artifact alone is not a lookup.
+        is_code, needs_external = coding_request(q)
+        if is_code:
+            return RouteResult(
+                mode="research" if needs_external else "direct",
+                reason="coding_external_dependency" if needs_external else "coding",
                 confidence=0.95,
             )
 
@@ -221,8 +232,10 @@ class SemanticRouter:
         if s.startswith("hitung "):
             s = s[7:].strip()
 
+        # A temporal adverb can describe when the computed answer applies;
+        # accept it only as a suffix to an otherwise complete expression.
         return re.fullmatch(
-            r"[0-9\.\+\-\*/\(\)\sxX×÷=]+",
+            r"[0-9\.\+\-\*/\(\)\sxX×÷=]+(?:\s+(?:sekarang|now))?",
             s,
         ) is not None
 
@@ -377,13 +390,66 @@ class SemanticRouter:
         )
 
         has_reasoning = any(term in s for term in reasoning_terms)
+        # A single supplied number can still define a local quantitative
+        # problem when the prompt shows an operation or an omitted/excluded input.
+        has_arithmetic_word_problem = (
+            len(re.findall(r"\d+(?:[.,]\d+)?", s)) >= 1
+            and any(
+                term in s
+                for term in ("berapa", "hitung", "jumlah", "total", "calculate")
+            )
+            and (
+                any(
+                    term in s
+                    for term in (
+                        "naik",
+                        "turun",
+                        "bertambah",
+                        "berkurang",
+                        "setengah",
+                        "ditambah",
+                        "dikurangi",
+                        "pasang",
+                        "kali",
+                        "dibagi",
+                        "plus",
+                        "minus",
+                        "increased",
+                        "decreased",
+                        "half",
+                    )
+                )
+                or any(
+                    term in s
+                    for term in (
+                        "tidak dihitung",
+                        "tidak termasuk",
+                        "dikecualikan",
+                        "tidak diberikan",
+                        "belum diberikan",
+                        "tidak diketahui",
+                        "belum diketahui",
+                        "tidak disebutkan",
+                        "belum disebutkan",
+                        "not counted",
+                        "not included",
+                        "not provided",
+                        "not specified",
+                        "unknown",
+                    )
+                )
+            )
+        )
 
         # 1. Structural out-of-band attachment evidence
         if has_attachments:
-            return has_reasoning
+            return has_reasoning or has_arithmetic_word_problem
 
         # 2. In-band inline syntactic data payload (compatibility layer)
-        return has_reasoning and self._has_syntactic_data_payload(q)
+        return (
+            (has_reasoning and self._has_syntactic_data_payload(q))
+            or has_arithmetic_word_problem
+        )
 
     def _looks_like_external_lookup(self, q: str):
         external_terms = (
@@ -405,7 +471,33 @@ class SemanticRouter:
             "api",
         )
 
-        return any(term in q for term in external_terms)
+        # Match complete words/phrases: "api" must not match "tetapi"/"sapi".
+        # Preserve common English plurals and whitespace within phrases.
+        plural_terms = {"api", "price", "review", "release", "specification"}
+        matched_terms = tuple(
+            term for term in external_terms
+            if re.search(
+                r"(?<!\w)"
+                + r"\s+".join(re.escape(word) for word in term.split())
+                + (r"s?" if term in plural_terms else "")
+                + r"(?!\w)",
+                q,
+                re.IGNORECASE,
+            )
+        )
+        if not matched_terms:
+            return False
+
+        # "sekarang" alone is ambiguous: for a detected word problem it can
+        # refer to the derived result, not request a current external fact.
+        # Other external lookup terms retain their research precedence.
+        if (
+            matched_terms == ("sekarang",)
+            and self._is_self_contained_reasoning(q)
+        ):
+            return False
+
+        return True
 
     def _looks_like_empirical_research(self, q: str) -> bool:
         research_terms = (

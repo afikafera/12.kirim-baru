@@ -227,7 +227,8 @@ class PlannerContractValidator:
             logger.warning("[plan_validator] Input is not a dict; generating fallback.")
             return cls._fallback(goal)
 
-        goal_text = str(plan.get("goal") or goal or "").strip()
+        original_goal = str(goal or "").strip()
+        goal_text = str(plan.get("goal") or original_goal).strip()
 
         raw_delivs = plan.get("deliverables")
         if not isinstance(raw_delivs, list):
@@ -451,7 +452,8 @@ class PlannerContractValidator:
         if has_structured_deliverables and has_any_produces_field and validated_deliverables:
             # 6. Invariant I11: Multi-Producer Authority Semantics
             # Non-comparison query with >1 producer for the same deliverable -> validation failure / fallback
-            is_comparison = cls.is_comparison_goal(goal_text)
+            comparison_goal = original_goal or goal_text
+            is_comparison = cls.is_comparison_goal(comparison_goal)
             producers_by_deliv = {}
             for node in valid_nodes:
                 for d_id in node.get("produces_deliverable", []):

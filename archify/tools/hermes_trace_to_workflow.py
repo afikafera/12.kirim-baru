@@ -15,11 +15,11 @@ with src.open() as f:
 request_id = events[0].get("request_id", "unknown") if events else "unknown"
 
 # ------------------------------------------------------------
-# Hermes runtime lanes
+# ARAN runtime lanes
 # ------------------------------------------------------------
 
 lanes = [
-    {"id": "core", "label": "Hermes Core"},
+    {"id": "core", "label": "ARAN Core"},
     {"id": "tools", "label": "Search / Evidence"},
 ]
 
@@ -335,7 +335,7 @@ output = {
     "schema_version": 2,
     "diagram_type": "workflow",
     "meta": {
-        "title": f"Hermes Trace {request_id}",
+        "title": f"ARAN Trace {request_id}",
         "animation": "trace",
         "visual_preset": "signal-flow",
         "quality_profile": "showcase",

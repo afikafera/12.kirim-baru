@@ -90,6 +90,9 @@ class FakeClassifier:
         })
         return self.outcome
 
+    def failure_subtype(self, result=None, *, exception=None):
+        return None
+
 
 class FakeCoverage:
     def __init__(self, result):
@@ -108,9 +111,12 @@ class FakePolicy:
         self.result = result
         self.calls = []
 
-    def decide(self, section, state, outcome, coverage):
+    def decide(
+        self, section, state, outcome, coverage, *,
+        multi_model_router=False, failure_subtype=None,
+    ):
         self.calls.append(
-            (section, state, outcome, coverage)
+            (section, state, outcome, coverage, multi_model_router, failure_subtype)
         )
         return self.result
 

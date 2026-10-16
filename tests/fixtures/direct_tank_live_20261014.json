@@ -1,0 +1,30 @@
+{
+  "question": "Sebuah tangki air berkapasitas **1.500 liter** dalam keadaan kosong. Tangki tersebut diisi air melalui sebuah pipa dengan debit **250 mililiter per detik**. Namun, di dasar tangki terdapat kebocoran kecil yang mengeluarkan air sebesar **3 liter setiap 5 menit**.\nJika pengisian air dimulai pada pukul **08.00 pagi**, pada pukul berapa tangki tersebut akan terisi penuh? Dan jika setiap **500 liter** air yang terisi menambah berat tangki sebesar **0,5 ton**, berapa total berat air dalam satuan **kilogram (kg)** saat tangki penuh?",
+  "drafts": [
+    {
+      "model": "@cf/qwen/qwen2.5-coder-32b-instruct",
+      "observation_id": "ecbba494e84a80ff",
+      "content": {
+        "facts": [
+          "1.500 liter",
+          "250 mililiter per detik",
+          "3 liter setiap 5 menit",
+          "08.00 pagi",
+          "500 liter",
+          "0,5 ton"
+        ],
+        "calculations": [],
+        "unknowns": [
+          "waktu_isi_tangki_detik",
+          "total_berat_air_kg"
+        ],
+        "examples": []
+      }
+    },
+    {
+      "model": "@cf/mistralai/mistral-small-3.1-24b-instruct",
+      "observation_id": "e5aa15adc89ffcea",
+      "content": "```json\n{\n \"facts\": [\"1.500 liter\", \"250 mililiter per detik\", \"3 liter setiap 5 menit\", \"08.00 pagi\", \"500 liter\", \"0,5 ton\"],\n \"calculations\": [\n  {\"expression\": \"1500 / (250 / 1000 * 60 - 3 / 5)\", \"result\": \"1500 / (15 - 0.6)\"},\n  {\"expression\": \"1500 / (14.4)\", \"result\": \"104.16666666666667\"},\n  {\"expression\": \"104.16666666666667 * 60\", \"result\": \"6250\"},\n  {\"expression\": \"08.00 + 6250 / 60 / 60\", \"result\": \"08.00 + 1.736111111111111\"},\n  {\"expression\": \"1.736111"
+    }
+  ]
+}

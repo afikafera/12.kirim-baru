@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import sys
+import time
 import uuid
 sys.path.insert(0, "/home/arman/research-assistant")
 
@@ -13,13 +15,15 @@ from calibration.calibrator import ConfidenceCalibrator
 from llm_analyzer.analyzer import LLMAnalyzer
 from outcome_logger.logger import OutcomeLogger
 from lessons_engine.engine import LessonsEngine
-from hermes_agent.orchestrator import HermesAgent
+from hermes_agent.orchestrator import AranAgent
+from hermes_agent.research_status import ensure_research_metadata
+from hermes_agent.direct_provider_recovery import DirectProviderFailure
 from api.auth import install_auth
 from api.model_registry import models_response
 from api.ui import install_ui
 from memory_manager.backends.postgres import ConversationNotFoundError
 
-app = FastAPI(title="Technical Research Assistant")
+app = FastAPI(title="ARAN")
 install_auth(app)
 install_ui(app)
 mm = MemoryManager(config)
@@ -27,7 +31,20 @@ cal = ConfidenceCalibrator(mm)
 llm = LLMAnalyzer(config)
 outcome_logger = OutcomeLogger(mm, cal)
 lessons_engine = LessonsEngine(mm, llm)
-hermes = HermesAgent(mm, cal, llm, outcome_logger, lessons_engine)
+aran = AranAgent(mm, cal, llm, outcome_logger, lessons_engine)
+
+
+@app.exception_handler(DirectProviderFailure)
+async def direct_provider_failure_handler(_request: Request, failure: DirectProviderFailure):
+    print(
+        f"[REQ {failure.request_id}] END direct provider_failure "
+        f"code={failure.failure_class} attempts={failure.attempts}",
+        flush=True,
+    )
+    return JSONResponse(
+        status_code=failure.status_code,
+        content={"error": failure.public_error()},
+    )
 
 
 class ResearchRequest(BaseModel):
@@ -70,14 +87,14 @@ def _conversation_response(row):
 
 @app.get("/")
 def root():
-    return {"app": "Technical Research Assistant", "version": "2.0"}
+    return {"app": "ARAN", "version": "2.0"}
 
 
 @app.post("/research")
 def research(req: ResearchRequest):
     with llm.use_model(req.model):
-        result = hermes.research(req.query)
-    return result
+        result = aran.research(req.query)
+    return ensure_research_metadata(result)
 
 
 @app.get("/research/{research_id}")
@@ -184,17 +201,9 @@ def get_conversation(conversation_id: str, request: Request):
 async def chat_completions(request: dict, http_request: Request):
     messages = request.get("messages", [])
     model = request.get("model")
-    print(f"[MODEL] requested={model!r}", flush=True)
 
     req_id = uuid.uuid4().hex[:8]
     print(f"[REQ {req_id}] START", flush=True)
-
-    import json
-
-    print("=" * 80)
-    print("RAW REQUEST MESSAGES")
-    print(json.dumps(messages, indent=2, ensure_ascii=False))
-    print("=" * 80)
 
     from hermes_agent.attachment_handler import collect_attachments
 
@@ -218,31 +227,15 @@ async def chat_completions(request: dict, http_request: Request):
     else:
         user_msg = ""
 
-    print("USER_MSG =", repr(user_msg))
     print(
         f"[ATTACHMENT INPUT] evidence={len(attachment_bundle['evidence'])} "
         f"images={len(attachment_bundle['images'])}",
         flush=True,
     )
-    print("=" * 80)
-
-    
-    import json
-    import logging
-
-    logging.getLogger("api.debug").info(
-        "RAW_MESSAGES=%s",
-        json.dumps(messages, ensure_ascii=False)
-    )
-    logging.getLogger("api.debug").info(
-        "USER_MSG=%r",
-        user_msg
-    )
-
 
     # ---- Open WebUI internal tasks ----
     # Open WebUI mengirim task internal seperti chat tagging.
-    # Task ini bukan research request dan tidak boleh masuk Hermes pipeline.
+    # Task ini bukan research request dan tidak boleh masuk ARAN pipeline.
     if (
         user_msg.startswith("### Task:")
         and "Generate 1-3 broad tags categorizing the main themes" in user_msg
@@ -250,7 +243,7 @@ async def chat_completions(request: dict, http_request: Request):
         and "<chat_history>" in user_msg
     ):
         with llm.use_model(model):
-            tag_result = hermes.llm.analyze(
+            tag_result = aran.llm.analyze(
                 system_prompt=(
                     "You are an Open WebUI chat-tagging assistant. "
                     "Follow the user's task exactly. "
@@ -307,7 +300,7 @@ async def chat_completions(request: dict, http_request: Request):
         and "<chat_history>" in user_msg
     ):
         with llm.use_model(model):
-            title_result = hermes.llm.analyze(
+            title_result = aran.llm.analyze(
                 system_prompt=(
                     "You are an Open WebUI chat-title assistant. "
                     "Follow the user's task exactly. "
@@ -337,12 +330,12 @@ async def chat_completions(request: dict, http_request: Request):
 
     # ---- Open WebUI unknown internal tasks ----
     # Future Open WebUI tasks not covered by the explicit handlers above
-    # must not enter the Hermes research pipeline.
+    # must not enter the ARAN research pipeline.
     if user_msg.startswith("### Task:"):
         print(f"[REQ {req_id}] generic webui internal task", flush=True)
 
         with llm.use_model(model):
-            task_result = hermes.llm.analyze(
+            task_result = aran.llm.analyze(
                 system_prompt=(
                     "You are an Open WebUI internal task assistant. "
                     "Follow the task exactly. "
@@ -435,14 +428,15 @@ async def chat_completions(request: dict, http_request: Request):
     langfuse = get_client()
     with langfuse.start_as_current_observation(
         as_type="span",
-        name="hermes-research",
+        name="aran-research",
         input={"request_id": req_id},
     ):
         with llm.use_model(model):
-            result = hermes.research(
+            result = aran.research(
                 user_msg,
                 context=conversation_context,
                 attachments=attachment_bundle["evidence"],
+                request_id=req_id,
             )
 
     persist_exchange = result is not None and latest_is_user_message
@@ -453,13 +447,14 @@ async def chat_completions(request: dict, http_request: Request):
         }
     elif result is None:
         print(
-            f"[REQ {req_id}] WARNING: hermes.research returned None",
+            f"[REQ {req_id}] WARNING: aran.research returned None",
             flush=True,
         )
         result = {
             "goal": "chat",
             "answer": "",
         }
+    result = ensure_research_metadata(result)
 
     response_conversation_id = str(conversation_uuid) if conversation_uuid else None
     if persist_exchange:
@@ -482,6 +477,7 @@ async def chat_completions(request: dict, http_request: Request):
     response_body = {
         "id": result.get("goal", "chat"),
         "object": "chat.completion",
+        "created": int(time.time()),
         "model": model or llm.default_model,
         "choices": [{
             "index": 0,
@@ -491,4 +487,6 @@ async def chat_completions(request: dict, http_request: Request):
     }
     if response_conversation_id is not None:
         response_body["conversation_id"] = response_conversation_id
+    if isinstance(result, dict) and isinstance(result.get("research"), dict):
+        response_body["research"] = result["research"]
     return response_body

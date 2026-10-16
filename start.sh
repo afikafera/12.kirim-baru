@@ -1,10 +1,23 @@
 #!/bin/bash
 echo "========================================"
-echo " Technical Research Assistant - Startup"
+echo " ARAN - Startup"
 echo "========================================"
 
 cd ~/research-assistant
 source venv/bin/activate
+
+python - <<'PY_AUTH'
+from config import load_config
+from api.auth import AuthConfig
+
+load_config()
+AuthConfig.from_environment()
+print("ARAN authentication config: ready")
+PY_AUTH
+if [ $? -ne 0 ]; then
+    echo "Startup stopped: ARAN authentication config missing or invalid"
+    exit 1
+fi
 
 echo ""
 echo "[1/3] Starting Docker containers..."
@@ -50,7 +63,7 @@ fi
 echo "[3/3] Starting FastAPI..."
 sudo pkill uvicorn 2>/dev/null
 sleep 1
-uvicorn api.main:app --host 0.0.0.0 --port 8000 &
+uvicorn api.main:app --host 127.0.0.1 --port 8000 &
 sleep 3
 
 echo "[3/3] Verifying services..."

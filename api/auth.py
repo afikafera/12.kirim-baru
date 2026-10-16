@@ -1,4 +1,4 @@
-"""Single-account session authentication for the Hermes HTTP API."""
+"""Single-account session authentication for the ARAN HTTP API."""
 
 from __future__ import annotations
 
@@ -252,4 +252,4 @@ def install_auth(app: FastAPI) -> SessionStore:
 if __name__ == "__main__":
     import getpass
 
-    print(hash_password(getpass.getpass("New Hermes login password: ")))
+    print(hash_password(getpass.getpass("New ARAN login password: ")))

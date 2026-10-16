@@ -61,7 +61,7 @@ class SearchGateway:
         1. DuckDuckGo direct
         2. SearXNG fallback
 
-    Search ranking belongs here, not in Hermes Core.
+    Search ranking belongs here, not in ARAN Core.
     """
 
     DDG_URL = "https://html.duckduckgo.com/html/"
@@ -145,7 +145,7 @@ class SearchGateway:
             request = urllib.request.Request(
                 f"{self.SEARXNG_URL}?{params}",
                 headers={
-                    "User-Agent": "Hermes-Research-Assistant/1.0",
+                    "User-Agent": "ARAN-Research-Assistant/1.0",
                 },
             )
 

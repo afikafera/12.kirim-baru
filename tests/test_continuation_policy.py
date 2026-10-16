@@ -21,11 +21,12 @@ class ContinuationPolicyTests(unittest.TestCase):
             max_continuations=2,
         )
 
-    def state(self, continuation_count=0, remaining=None):
+    def state(self, continuation_count=0, remaining=None, provider_retry_count=0):
         return SectionRuntimeState(
             section_id="S001",
             status=SectionStatus.IN_FLIGHT,
             continuation_count=continuation_count,
+            provider_retry_count=provider_retry_count,
             remaining_items=list(remaining or []),
         )
 
@@ -97,7 +98,7 @@ class ContinuationPolicyTests(unittest.TestCase):
 
         self.assertEqual(result.decision, ContinuationDecision.DEGRADE)
 
-    def test_truncated_splits_after_continuation_budget(self):
+    def test_truncated_degrades_after_continuation_budget(self):
         result = ContinuationPolicy.decide(
             self.section,
             self.state(continuation_count=2),
@@ -105,7 +106,8 @@ class ContinuationPolicyTests(unittest.TestCase):
             self.coverage(["routing", "recovery"]),
         )
 
-        self.assertEqual(result.decision, ContinuationDecision.SPLIT)
+        self.assertEqual(result.decision, ContinuationDecision.DEGRADE)
+        self.assertEqual(result.reason, "truncated_continuation_budget_exhausted")
 
     def test_semantic_incomplete_degrades_with_multiple_remaining_items_after_budget(self):
         result = ContinuationPolicy.decide(
@@ -137,15 +139,37 @@ class ContinuationPolicyTests(unittest.TestCase):
 
         self.assertEqual(result.decision, ContinuationDecision.DEGRADE)
 
-    def test_provider_failure_degrades(self):
+    def test_provider_failure_retries_once_within_same_section(self):
+        result = ContinuationPolicy.decide(
+            self.section,
+            self.state(),
+            OutcomeType.PROVIDER_FAILURE,
+            self.coverage(["routing"]),
+            multi_model_router=True,
+            failure_subtype="transient_unavailable",
+        )
+
+        self.assertEqual(result.decision, ContinuationDecision.CONTINUE)
+
+        exhausted = ContinuationPolicy.decide(
+            self.section,
+            self.state(provider_retry_count=1),
+            OutcomeType.PROVIDER_FAILURE,
+            self.coverage(["routing"]),
+            multi_model_router=True,
+            failure_subtype="transient_unavailable",
+        )
+        self.assertEqual(exhausted.decision, ContinuationDecision.DEGRADE)
+
+    def test_single_model_provider_failure_degrades_without_retry(self):
         result = ContinuationPolicy.decide(
             self.section,
             self.state(),
             OutcomeType.PROVIDER_FAILURE,
             self.coverage(["routing"]),
         )
-
         self.assertEqual(result.decision, ContinuationDecision.DEGRADE)
+        self.assertEqual(result.reason, "provider_failure_single_model")
 
     def test_structural_invalid_degrades(self):
         result = ContinuationPolicy.decide(
@@ -157,7 +181,7 @@ class ContinuationPolicyTests(unittest.TestCase):
 
         self.assertEqual(result.decision, ContinuationDecision.DEGRADE)
 
-    def test_incomplete_signal_without_remaining_finalizes(self):
+    def test_truncated_without_remaining_continues_when_budget_available(self):
         result = ContinuationPolicy.decide(
             self.section,
             self.state(),
@@ -165,7 +189,8 @@ class ContinuationPolicyTests(unittest.TestCase):
             self.coverage([]),
         )
 
-        self.assertEqual(result.decision, ContinuationDecision.FINALIZE)
+        self.assertEqual(result.decision, ContinuationDecision.CONTINUE)
+        self.assertEqual(result.reason, "truncated_continuation_budget_available")
 
     def test_policy_does_not_use_token_heuristics(self):
         state = self.state(

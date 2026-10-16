@@ -183,7 +183,7 @@ class TokenProfiler:
     def print_report(self):
         s = self.summary()
         print("=" * 50)
-        print("HERMES RESEARCH REPORT")
+        print("ARAN RESEARCH REPORT")
         print("=" * 50)
         print(f"Request    : {s['request_id']}")
         print(f"Model      : {s['model']} ({s['provider']})")

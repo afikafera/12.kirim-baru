@@ -5,7 +5,7 @@ logger = logging.getLogger(__name__)
 
 class SkillBridge:
     """
-    Bridge antara Hermes capability selection dan skill/tool executors.
+    Bridge antara ARAN capability selection dan skill/tool executors.
 
     Tidak mengubah orchestrator.
     Tidak mengubah SkillRouter.

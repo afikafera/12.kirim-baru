@@ -1,0 +1,20 @@
+[Unit]
+Description=Hermes rollback API from preserved live source
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=arman
+Group=arman
+WorkingDirectory=/home/arman/research-assistant
+ExecStart=/home/arman/research-assistant/venv/bin/uvicorn api.main:app --app-dir /var/lib/hermes-rollback/live-source-20261002 --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-rollback
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

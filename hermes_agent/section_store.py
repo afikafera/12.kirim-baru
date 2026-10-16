@@ -1,5 +1,5 @@
 """
-State store for Hermes Output Scaling sections.
+State store for ARAN Output Scaling sections.
 
 This v1 implementation is intentionally in-memory. It provides an
 explicit persistence boundary for SectionRuntimeState without coupling
@@ -89,7 +89,19 @@ class SectionStore:
 
         state = self.get(section_id)
         state.chunks.append(chunk)
-        state.accumulated_text = "".join(state.chunks)
+        assembled = []
+        for index, part in enumerate(state.chunks):
+            if index:
+                previous = state.chunks[index - 1]
+                if (
+                    previous
+                    and part
+                    and not previous[-1].isspace()
+                    and not part[0].isspace()
+                ):
+                    assembled.append("\n\n")
+            assembled.append(part)
+        state.accumulated_text = "".join(assembled)
         self.put(state)
 
         return state
@@ -100,11 +112,13 @@ class SectionStore:
         *,
         attempts_total=None,
         continuation_count=None,
+        provider_retry_count=None,
         budget_used_tokens=None,
         last_model=None,
         last_finish_reason=None,
         last_tokens_output=None,
         last_outcome=None,
+        last_failure_subtype=None,
     ) -> SectionRuntimeState:
         """Update explicit runtime metadata without changing lifecycle state."""
         state = self.get(section_id)
@@ -114,6 +128,9 @@ class SectionStore:
 
         if continuation_count is not None:
             state.continuation_count = int(continuation_count)
+
+        if provider_retry_count is not None:
+            state.provider_retry_count = int(provider_retry_count)
 
         if budget_used_tokens is not None:
             state.budget_used_tokens = int(budget_used_tokens)
@@ -129,6 +146,9 @@ class SectionStore:
 
         if last_outcome is not None:
             state.last_outcome = last_outcome
+
+        if last_failure_subtype is not None:
+            state.last_failure_subtype = str(last_failure_subtype)
 
         self.put(state)
         return state

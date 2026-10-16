@@ -1,5 +1,5 @@
 """
-Deterministic output aggregation for Hermes Output Scaling.
+Deterministic output aggregation for ARAN Output Scaling.
 
 Boundary:
     OutputManifest + SectionStore -> AggregatedOutput

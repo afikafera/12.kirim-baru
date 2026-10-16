@@ -82,7 +82,7 @@ function sortedConversations(backend) {
   );
 }
 
-async function loadPage({ backend = makeBackend(), storage = new Map(), failDetail = new Set(), chatGate = null } = {}) {
+async function loadPage({ backend = makeBackend(), storage = new Map(), failDetail = new Set(), chatGate = null, chatStatus = null } = {}) {
   const ids = [
     "messages", "status", "prompt", "send", "new-chat", "empty-state",
     "chat-form", "logout", "identity", "model-picker", "model-trigger",
@@ -148,6 +148,7 @@ async function loadPage({ backend = makeBackend(), storage = new Map(), failDeta
         return json({
           conversation_id: conversation.id,
           choices: [{ message: { content: `answer: ${prompt}` } }],
+          ...(chatStatus ? { research: { status: chatStatus, degraded: chatStatus !== "DONE" } } : {}),
         });
       };
       return chatGate ? chatGate(perform) : perform();
@@ -309,6 +310,18 @@ async function run() {
   assert.match(html, /<aside class="sidebar"/);
   assert.match(html, /id="conversation-list"/);
   assert.match(html, /id="new-chat"/);
+
+  // Canonical research outcome is visible while the assistant answer remains rendered.
+  for (const [status, expectedText] of [
+    ["DONE", /Riset selesai/i],
+    ["PARTIAL", /belum lengkap/i],
+    ["FAILED", /gagal|degradasi/i],
+  ]) {
+    const statusPage = await loadPage({ chatStatus: status });
+    await submit(statusPage, `status ${status}`);
+    assert.match(statusPage.elements.get("status").textContent, expectedText);
+    assert.equal(visibleMessages(statusPage.elements.get("messages"))[1].content, `answer: status ${status}`);
+  }
 
   console.log("conversation sidebar tests: PASS (list, select, new chat, returned ID, continuation, refresh, model, load failure, race guard, logout)");
 }

@@ -71,7 +71,7 @@ class BrowserResearchController:
 
     @staticmethod
     def _run(coro):
-        """Run one browser coroutine from the synchronous Hermes boundary."""
+        """Run one browser coroutine from the synchronous ARAN boundary."""
         return asyncio.run(coro)
 
     def _decide(

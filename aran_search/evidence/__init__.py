@@ -16,18 +16,31 @@ class DocumentIntelligence:
         self.classifier = Classifier()
         self.sections = SectionEngine()
 
-    def process(self, raw_content: str, query: str, url: str = "") -> dict:
+    def process(
+        self,
+        raw_content: str,
+        query: str,
+        url: str = "",
+        preserve_full_file: bool = False,
+    ) -> dict:
         if not raw_content:
             return {"formatted": "", "doc_type": "unknown", "sections": 0}
         normalized = self.normalizer.normalize(raw_content)
-        doc_type = self.classifier.classify(normalized)
-        kv_count = len(self.classifier.KV_LINE.findall(normalized))
+        doc_type = self.classifier.classify(normalized, url=url)
+        kv_count = 0 if doc_type == "source_code" else len(self.classifier.KV_LINE.findall(normalized))
         logger.info(
             "[AUDIT DOCTYPE] url=%s doc_type=%s kvs=%d normalized_len=%d",
             url, doc_type, kv_count, len(normalized),
         )
-        all_sections = self.sections.split_sections(normalized)
-        formatted = self.sections.rank_and_filter(all_sections, query)
+        all_sections = self.sections.split_sections(normalized, doc_type=doc_type)
+        if preserve_full_file:
+            formatted = normalized
+        else:
+            formatted = self.sections.rank_and_filter(
+                all_sections,
+                query,
+                doc_type=doc_type,
+            )
 
         low = raw_content.lower()
         for m in TRACE_MARKERS:
@@ -42,7 +55,11 @@ class DocumentIntelligence:
             "formatted": formatted,
             "doc_type": doc_type,
             "sections_total": len(all_sections),
-            "sections_kept": formatted.count("## "),
+            "sections_kept": (
+                len(all_sections)
+                if preserve_full_file
+                else formatted.count("## ")
+            ),
             "char_before": len(raw_content),
             "char_after": len(formatted),
         }

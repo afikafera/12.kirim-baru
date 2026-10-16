@@ -1,0 +1,9 @@
+{
+  "model": "9routerpc",
+  "query": "Sebuah kereta berangkat dari stasiun A membawa 100 penumpang. Di stasiun B, 20 orang turun dan 15 orang naik. Di stasiun C, jumlah penumpang berkurang setengahnya. Di stasiun D, 5 pasang suami istri naik. Berapa jumlah penumpang sekarang dan berapa jumlah total roda kereta jika setiap gerbong diisi maksimal 40 orang?\"",
+  "submitBefore": "2026-10-14T11:44:16.011Z",
+  "submitAfter": "2026-10-14T11:44:16.076Z",
+  "answer": "## Penyelesaian\n\n**Jumlah penumpang di setiap stasiun:**\n\n1. **Stasiun A:** 100 penumpang\n2. **Stasiun B:** 100 − 20 + 15 = **95 penumpang**\n3. **Stasiun C:** 95 ÷ 2 = **47,5 penumpang**\n4. **Stasiun D:** 47,5 + (5 × 2) = 47,5 + 10 = **57,5 penumpang**\n\n### Hasil:\n\n**Jumlah penumpang sekarang: 57,5 orang**\n\n> ⚠️ **Ketidakkonsistenan domain:** Jumlah penumpang seharusnya bilangan bulat, tetapi perhitungan menghasilkan **47,5** di stasiun C (95 ÷ 2) karena 95 adalah bilangan ganjil. Ini berdampak pada hasil akhir **57,5** yang juga bukan bilangan bulat.\n\n**Jumlah gerbong yang dibutuhkan:**\n- 57,5 ÷ 40 = 1,4375 → **2 gerbong** (dibulatkan ke atas karena tidak boleh ada penumpang tertinggal)\n\n**Jumlah total roda kereta:**\n- Informasi tentang **berapa roda per gerbong** tidak disediakan dalam soal.\n- Jika diasumsikan setiap gerbong memiliki **4 roda** (fakta umum kereta api, bukan informasi dari soal):\n  - 2 gerbong × 4 roda = **8 roda**\n\n> ⚠️ **Catatan:** Jumlah roda tidak dapat ditentukan secara pasti hanya dari informasi yang diberikan. Asumsi 4 roda per gerbong didasarkan pada pengetahuan umum, bukan fakta yang eksplisit dalam soal.",
+  "researchStatus": "",
+  "answerSemantics": "FAIL: adds unsupported 4 wheels per carriage / 8 wheels assumption"
+}

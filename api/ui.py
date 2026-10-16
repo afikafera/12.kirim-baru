@@ -1,4 +1,4 @@
-"""Minimal same-origin pages for the Hermes session API."""
+"""Minimal same-origin pages for the ARAN session API."""
 
 from pathlib import Path
 
@@ -30,5 +30,5 @@ def install_ui(app: FastAPI) -> None:
     app.mount(
         "/static",
         StaticFiles(directory=_UI_ROOT / "static"),
-        name="hermes-static",
+        name="aran-static",
     )
